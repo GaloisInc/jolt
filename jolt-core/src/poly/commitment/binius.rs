@@ -15,7 +15,7 @@ pub struct Binius128Scheme<ProofTranscript: Transcript> {
     _phantom: PhantomData<ProofTranscript>,
 }
 
-#[derive(Default, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Default, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct BiniusCommitment {}
 
 impl AppendToTranscript for BiniusCommitment {

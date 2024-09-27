@@ -37,7 +37,7 @@ use crate::jolt::subtable::{
     truncate_overflow::TruncateOverflowSubtable, xor::XorSubtable, JoltSubtableSet, LassoSubtable,
     SubtableId,
 };
-use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::commitment::commitment_scheme::StreamingCommitmentScheme;
 
 /// Generates an enum out of a list of JoltInstruction types. All JoltInstruction methods
 /// are callable on the enum type via enum_dispatch.
