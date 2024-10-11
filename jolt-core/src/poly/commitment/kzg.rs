@@ -281,7 +281,8 @@ where
         poly: &UniPoly<P::ScalarField>,
         offset: usize,
     ) -> Result<P::G1Affine, ProofVerifyError> {
-        Self::commit_inner(pk, &poly.coeffs, offset)
+        // Self::commit_inner(pk, &poly.coeffs, offset)
+        Self::commit_inner(pk, &poly.coeffs[offset..], offset, CommitMode::Default)
     }
 
     #[tracing::instrument(skip_all, name = "KZG::commit")]
@@ -320,22 +321,77 @@ where
         coeffs: &[P::ScalarField],
         offset: usize,
     ) -> Result<P::G1Affine, ProofVerifyError> {
-        if pk.g1_powers().len() < coeffs.len() {
+        let final_commitment = Self::commit_inner_helper(pk, coeffs, offset, mode)?;
+        Ok(final_commitment.into_affine())
+    }
+
+    #[inline]
+    pub(crate) fn commit_inner_helper(
+        pk: &KZGProverKey<P>,
+        coeffs: &[P::ScalarField],
+        offset: usize,
+        mode: CommitMode,
+    ) -> Result<P::G1, ProofVerifyError> {
+        if pk.g1_powers().len() < offset + coeffs.len() {
             return Err(ProofVerifyError::KeyLengthError(
                 pk.g1_powers().len(),
-                coeffs.len(),
+                offset + coeffs.len(),
             ));
         }
 
-        let c = <P::G1 as VariableBaseMSM>::msm_field_elements(
-            &pk.g1_powers()[offset..coeffs.len()],
-            pk.gpu_g1().map(|g| &g[offset..coeffs.len()]),
-            &coeffs[offset..],
-            None,
-            use_icicle(),
-        )?;
+        // let c = <P::G1 as VariableBaseMSM>::msm_field_elements(
+        //     &pk.g1_powers()[offset..coeffs.len()],
+        //     pk.gpu_g1().map(|g| &g[offset..coeffs.len()]),
+        //     &coeffs[offset..],
+        //     None,
+        //     use_icicle(),
+        // )?;
 
-        Ok(c.into_affine())
+        // Ok(c.into_affine())
+        match mode {
+            CommitMode::Default => {
+                let c = <P::G1 as VariableBaseMSM>::msm(
+                    &pk.g1_powers()[offset..offset + coeffs.len()],
+                    &coeffs,
+                )
+                .unwrap();
+                Ok(c)
+            }
+            CommitMode::GrandProduct => {
+                let g1_powers = &pk.g1_powers()[offset..offset + coeffs.len()];
+                // Commit to the non-1 coefficients first then combine them with the G commitment (all-1s vector) in the SRS
+                let (non_one_coeffs, non_one_bases): (Vec<_>, Vec<_>) = coeffs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, coeff)| {
+                        if *coeff != P::ScalarField::one() {
+                            // Subtract 1 from the coeff because we already have a commitment to the all the 1s
+                            Some((*coeff - P::ScalarField::one(), g1_powers[i]))
+                        } else {
+                            None
+                        }
+                    })
+                    .unzip();
+
+                // Perform MSM for the non-1 coefficients
+                let non_one_commitment = if !non_one_coeffs.is_empty() {
+                    <P::G1 as VariableBaseMSM>::msm(&non_one_bases, &non_one_coeffs).unwrap()
+                } else {
+                    P::G1::zero()
+                };
+
+                // find the right precomputed g_product to use
+                let num_powers = (coeffs.len() as f64).log2();
+                if num_powers.fract() != 0.0 {
+                    return Err(ProofVerifyError::InvalidKeyLength(coeffs.len()));
+                }
+                let num_powers = num_powers.floor() as usize;
+
+                // Combine G * H: Multiply the precomputed G commitment with the non-1 commitment (H)
+                let final_commitment = pk.srs.g_products[num_powers] + non_one_commitment;
+                Ok(final_commitment)
+            }
+        }
     }
 
     #[tracing::instrument(skip_all, name = "KZG::open")]
