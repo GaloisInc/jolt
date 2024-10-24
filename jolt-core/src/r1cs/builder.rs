@@ -4,7 +4,11 @@ use super::{
     ops::{Term, Variable, LC},
     special_polys::SparsePolynomial,
 };
-use crate::utils::transcript::Transcript;
+use crate::utils::{
+    transcript::Transcript,
+    collect_and_flatten_triple,
+    tuple_windows,
+};
 use crate::{
     field::JoltField,
     jolt::vm::JoltPolynomials,
@@ -514,6 +518,17 @@ impl OffsetEqConstraint {
             (LC::new(vec![]), false),
         )
     }
+
+}
+
+pub(crate) fn eval_offset_lc<F: JoltField>(offset: &OffsetLC, step: &Vec<F>, next_step_m: Option<&Vec<F>>)  -> F {
+    if !offset.0 {
+        offset.1.evaluate_row(step)
+    } else if let Some(next_step) = next_step_m {
+        offset.1.evaluate_row(next_step)
+    } else {
+        offset.1.constant_term_field()
+    }
 }
 
 // TODO(sragss): Detailed documentation with wiki.
@@ -641,28 +656,160 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         ProofTranscript: Transcript,
     >(
         &self,
-        flattened_polynomials: &[&DensePolynomial<F>],
+        flattened_polynomials: &[&DensePolynomial<F>], // N variables of (S steps)
     ) -> (
         SparsePolynomial<F>,
         SparsePolynomial<F>,
         SparsePolynomial<F>,
     ) {
-        let uniform_constraint_rows = self.uniform_repeat_constraint_rows();
+        // TODO: Get rid of this XXX
+        let num_vars = flattened_polynomials.len();
+        let num_steps = flattened_polynomials[0].len();
+        let mut transpose = vec![unsafe_allocate_zero_vec(num_vars);num_steps];
 
-        // uniform_constraints: Xz[0..uniform_constraint_rows]
-        let span = tracing::span!(tracing::Level::DEBUG, "uniform constraints");
+        for i in 0..num_vars {
+            for j in 0..num_steps {
+                transpose[j][i] = flattened_polynomials[i][j];
+            }
+        }
+
+        self.compute_spartan_Az_Bz_Cz_transpose::<PCS, ProofTranscript>(transpose)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn compute_spartan_Az_Bz_Cz_transpose<
+        PCS: CommitmentScheme<ProofTranscript, Field = F>,
+        ProofTranscript: Transcript,
+    >(
+        &self,
+        flattened_polynomials: Vec<Vec<F>>, // &[&[F]], // S steps of (N variables)
+    ) -> (
+        SparsePolynomial<F>,
+        SparsePolynomial<F>,
+        SparsePolynomial<F>,
+    ) {
+        let num_constraints = self.uniform_builder.constraints.len() + self.offset_equality_constraints.len();
+
+        let span = tracing::span!(tracing::Level::DEBUG, "uniform and non-uniform constraints");
         let _enter = span.enter();
+        let step_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = tuple_windows(flattened_polynomials.iter())
+            // .par_iter() // TODO: parallelize this.
+            .enumerate()
+            .map(|(step_index, (step, next_step_m))| {
+                // uniform_constraints
+                let (mut az_sparse, mut bz_sparse, cz_sparse): (Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>) = collect_and_flatten_triple(
+                    self.uniform_builder
+                    .constraints
+                    .iter() // TODO: .par_iter() XXX
+                    .enumerate()
+                    .map(|(constraint_index, constraint)| {
+                        // Evaluate a constraint on a given step.
+                        let evaluate_constraint = |lc: &LC| {
+                            let item = lc.evaluate_row(step);
+                            if !item.is_zero() {
+                                let global_index = step_index * num_constraints + constraint_index;
+                                Some((item, global_index))
+                            } else {
+                                None
+                            }
+                        };
+
+                        let a = evaluate_constraint(&constraint.a);
+                        let b = evaluate_constraint(&constraint.b);
+                        let c = evaluate_constraint(&constraint.c);
+                        (a, b, c)
+                    }));
+
+                // offset_equality_constraints: Xz[uniform_constraint_rows..uniform_constraint_rows + 1]
+                // (a - b) * condition == 0
+                // For the final step we will not compute the offset terms, and will assume the condition to be set to 0
+
+
+                // TODO: Compute this step in parallel...
+                for (constr_i, constr) in self.offset_equality_constraints.iter().enumerate() {
+                    let condition_eval = eval_offset_lc(&constr.cond, step, next_step_m);
+                    let eq_a_eval = eval_offset_lc(&constr.a, step, next_step_m);
+                    let eq_b_eval = eval_offset_lc(&constr.b, step, next_step_m);
+
+                    let az = eq_a_eval - eq_b_eval;
+                    let global_index = step_index * num_constraints + self.offset_equality_constraints.len() + constr_i;
+                    if !az.is_zero() {
+                        az_sparse.push((az, global_index));
+                    }
+
+                    let bz = condition_eval;
+                    if !bz.is_zero() {
+                        bz_sparse.push((bz, global_index));
+                    }
+
+                    // (0..self.uniform_repeat).for_each(|step_index| {
+                    //     // Write corresponding values, if outside the step range, only include the constant.
+                    //     let a_step = step_index + constr.a.0 as usize;
+                    //     let b_step = step_index + constr.b.0 as usize;
+                    //     let a = eq_a_evals
+                    //         .get(a_step)
+                    //         .cloned()
+                    //         .unwrap_or(constr.a.1.constant_term_field());
+                    //     let b = eq_b_evals
+                    //         .get(b_step)
+                    //         .cloned()
+                    //         .unwrap_or(constr.b.1.constant_term_field());
+                    //     let az = a - b;
+
+                    //     let global_index =
+                    //         uniform_constraint_rows + self.uniform_repeat * constr_i + step_index;
+                    //     if !az.is_zero() {
+                    //         az_sparse.push((az, global_index));
+                    //     }
+
+                    //     let condition_step = step_index + constr.cond.0 as usize;
+                    //     let bz = condition_evals
+                    //         .get(condition_step)
+                    //         .cloned()
+                    //         .unwrap_or(constr.cond.1.constant_term_field());
+                    //     if !bz.is_zero() {
+                    //         bz_sparse.push((bz, global_index));
+                    //     }
+                    // });
+                }
+
+
+
+
+
+
+
+
+
+                (az_sparse, bz_sparse, cz_sparse)
+            }).collect();
+
+        // TODO: Append padding up to self.uniform_repeat?
+        // (flattened_polynomials.len()..self.uniform_repeat).map(|step_index| {
+
+        // })
+
+
+
+
+
+        /*
         #[allow(clippy::type_complexity)]
+        // C constraints (up to S steps)
         let uni_constraint_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = self
             .uniform_builder
-            .constraints
+            .constraints // C constriants
             .par_iter()
             .enumerate()
             .map(|(constraint_index, constraint)| {
+                // size S?
                 let mut dense_output_buffer = unsafe_allocate_zero_vec(self.uniform_repeat);
 
+                // Evaluate a constraint on all steps?
+                // Returns up to S 
                 let mut evaluate_lc_chunk = |lc: &LC| {
                     if !lc.terms().is_empty() {
+                        // Run constraint on all steps
                         lc.evaluate_batch_mut(flattened_polynomials, &mut dense_output_buffer);
 
                         // Take only the non-zero elements and represent them as sparse tuples (eval, dense_index)
@@ -672,6 +819,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                                 let global_index =
                                     constraint_index * self.uniform_repeat + local_index;
                                 sparse.push((*item, global_index));
+                                println!("{},{}: {}", constraint_index, local_index, item);
                             }
                         }
                         sparse
@@ -687,63 +835,14 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                 (a_chunk, b_chunk, c_chunk)
             })
             .collect();
+        */
 
-        let (mut az_sparse, mut bz_sparse, cz_sparse) = par_flatten_triple(
-            uni_constraint_evals,
+        let (az_sparse, bz_sparse, cz_sparse) = par_flatten_triple(
+            step_evals,
             unsafe_allocate_sparse_zero_vec,
             self.offset_eq_constraint_rows(),
         );
 
-        // offset_equality_constraints: Xz[uniform_constraint_rows..uniform_constraint_rows + 1]
-        // (a - b) * condition == 0
-        // For the final step we will not compute the offset terms, and will assume the condition to be set to 0
-        let span = tracing::span!(tracing::Level::DEBUG, "non-uniform constraints");
-        let _enter = span.enter();
-
-        for (constr_i, constr) in self.offset_equality_constraints.iter().enumerate() {
-            let condition_evals = constr
-                .cond
-                .1
-                .evaluate_batch(flattened_polynomials, self.uniform_repeat);
-            let eq_a_evals = constr
-                .a
-                .1
-                .evaluate_batch(flattened_polynomials, self.uniform_repeat);
-            let eq_b_evals = constr
-                .b
-                .1
-                .evaluate_batch(flattened_polynomials, self.uniform_repeat);
-
-            (0..self.uniform_repeat).for_each(|step_index| {
-                // Write corresponding values, if outside the step range, only include the constant.
-                let a_step = step_index + constr.a.0 as usize;
-                let b_step = step_index + constr.b.0 as usize;
-                let a = eq_a_evals
-                    .get(a_step)
-                    .cloned()
-                    .unwrap_or(constr.a.1.constant_term_field());
-                let b = eq_b_evals
-                    .get(b_step)
-                    .cloned()
-                    .unwrap_or(constr.b.1.constant_term_field());
-                let az = a - b;
-
-                let global_index =
-                    uniform_constraint_rows + self.uniform_repeat * constr_i + step_index;
-                if !az.is_zero() {
-                    az_sparse.push((az, global_index));
-                }
-
-                let condition_step = step_index + constr.cond.0 as usize;
-                let bz = condition_evals
-                    .get(condition_step)
-                    .cloned()
-                    .unwrap_or(constr.cond.1.constant_term_field());
-                if !bz.is_zero() {
-                    bz_sparse.push((bz, global_index));
-                }
-            });
-        }
         drop(_enter);
 
         let num_vars = self.constraint_rows().next_power_of_two().log_2();

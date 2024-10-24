@@ -271,6 +271,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
     where
         Func: Fn(&F, &F, &F, &F) -> F + Sync,
     {
+        // println!("poly_A len: {}", poly_A.Z.len());
         let mut r: Vec<F> = Vec::new();
         let mut polys: Vec<CompressedUniPoly<F>> = Vec::new();
         let mut claim_per_round = *claim;

@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+
 use crate::field::JoltField;
 
 use ark_std::test_rng;
@@ -120,6 +121,69 @@ pub fn gen_random_point<F: JoltField>(memory_bits: usize) -> Vec<F> {
         r_i.push(F::random(&mut rng));
     }
     r_i
+}
+
+pub fn collect_and_flatten_triple<T>(iter: impl Iterator<Item = (Option<T>, Option<T>, Option<T>)>) -> (Vec<T>, Vec<T>, Vec<T>) {
+    // TODO: Allocate some size up front?
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    let mut zs = Vec::new();
+
+    for (mx, my, mz) in iter {
+        if let Some(x) = mx {
+            xs.push(x);
+        }
+        if let Some(y) = my {
+            ys.push(y);
+        }
+        if let Some(z) = mz {
+            zs.push(z);
+        }
+    }
+
+    (xs, ys, zs)
+}
+
+pub fn tuple_windows<T>(mut iter: impl Iterator<Item = T>) -> impl Iterator<Item = (T, Option<T>)>
+where
+    T: Clone,
+{
+    let current = iter.next();
+    TupleWindows {
+        iter,
+        current,
+    }
+}
+
+struct TupleWindows<I: Iterator> {
+    iter: I,
+    current: Option<I::Item>,
+}
+
+impl<I: Iterator> Iterator for TupleWindows<I>
+where
+    I::Item: Clone, // Can we avoid this clone?
+{
+    type Item = (I::Item, Option<I::Item>);
+
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut next = self.iter.next();
+        std::mem::swap(&mut self.current, &mut next);
+
+        if let Some(current) = next {
+            Some((current, self.current.clone()))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (c, s) = self.iter.size_hint();
+        (c + 1, s.map(|u| u + 1))
+    }
 }
 
 #[cfg(test)]
