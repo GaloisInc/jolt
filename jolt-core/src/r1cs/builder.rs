@@ -732,7 +732,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                     let eq_b_eval = eval_offset_lc(&constr.b, step, next_step_m);
 
                     let az = eq_a_eval - eq_b_eval;
-                    let global_index = step_index * num_constraints + self.offset_equality_constraints.len() + constr_i;
+                    let global_index = step_index * num_constraints + self.uniform_builder.constraints.len() + constr_i;
                     if !az.is_zero() {
                         az_sparse.push((az, global_index));
                     }
