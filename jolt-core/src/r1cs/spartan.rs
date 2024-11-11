@@ -229,6 +229,7 @@ where
             .map(|_i| transcript.challenge_scalar())
             .collect::<Vec<F>>();
 
+        println!("verify 1");
         let (claim_outer_final, r_x) = self
             .outer_sumcheck_proof
             .verify(F::zero(), num_rounds_x, 3, transcript)
@@ -260,17 +261,23 @@ where
             + r_inner_sumcheck_RLC * self.outer_sumcheck_claims.1
             + r_inner_sumcheck_RLC * r_inner_sumcheck_RLC * self.outer_sumcheck_claims.2;
 
+        println!("verify 2");
         let (claim_inner_final, inner_sumcheck_r) = self
             .inner_sumcheck_proof
             .verify(claim_inner_joint, num_rounds_y, 2, transcript)
             .map_err(|_| SpartanError::InvalidInnerSumcheckProof)?;
+        println!("verify 3");
 
         // n_prefix = n_segments + 1
         let n_prefix = key.uniform_r1cs.num_vars.next_power_of_two().log_2() + 1;
+        let _ = dbg!(n_prefix);
+        let _ = dbg!(r_x.len());
 
         let eval_Z = key.evaluate_z_mle(&self.claimed_witness_evals, &inner_sumcheck_r);
 
         let r_y = inner_sumcheck_r.clone();
+        let _ = dbg!(r_y.len());
+        let _ = dbg!(self.claimed_witness_evals.len());
         let r = [r_x, r_y].concat();
         let (eval_a, eval_b, eval_c) = key.evaluate_r1cs_matrix_mles(&r);
 
@@ -280,8 +287,10 @@ where
         let right_expected = eval_Z;
         let claim_inner_final_expected = left_expected * right_expected;
         if claim_inner_final != claim_inner_final_expected {
+            panic!();
             return Err(SpartanError::InvalidInnerSumcheckClaim);
         }
+        println!("verify 4");
 
         let flattened_commitments: Vec<_> = I::flatten::<C>()
             .iter()
@@ -295,6 +304,7 @@ where
             transcript,
         );
 
+        println!("verify 5");
         Ok(())
     }
 }
