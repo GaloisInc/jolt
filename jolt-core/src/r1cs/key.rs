@@ -173,7 +173,9 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
 
     /// Evaluates A(r_x, y) + r_rlc * B(r_x, y) + r_rlc^2 * C(r_x, y) where r_x = r_constr || r_step for all y.
     #[tracing::instrument(skip_all, name = "UniformSpartanKey::evaluate_r1cs_mle_rlc")]
-    pub fn evaluate_r1cs_mle_rlc(&self, r_constr: &[F], r_step: &[F], r_rlc: F) -> Vec<F> {
+    pub fn evaluate_r1cs_mle_rlc(&self, r_constr: &[F], r_step: &[F], r_rlc: F) -> Vec<F> { // Column vec, y in 0..|vars|
+        // TODO: Compute this in the new order..
+
         assert_eq!(
             r_constr.len(),
             (self.uniform_r1cs.num_rows + 1).next_power_of_two().log_2()
@@ -213,9 +215,9 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
             };
 
         let (eq_constants, condition_constants) = self.offset_eq_r1cs.constants();
-        let sm_a_r = compute_repeated(&self.uniform_r1cs.a, Some(eq_constants));
-        let sm_b_r = compute_repeated(&self.uniform_r1cs.b, Some(condition_constants));
-        let sm_c_r = compute_repeated(&self.uniform_r1cs.c, None);
+        let sm_a_r = compute_repeated(&self.uniform_r1cs.a, Some(eq_constants)); // V var entries
+        let sm_b_r = compute_repeated(&self.uniform_r1cs.b, Some(condition_constants)); // V var entries
+        let sm_c_r = compute_repeated(&self.uniform_r1cs.c, None); // V var entries
 
         let r_rlc_sq = r_rlc.square();
         let sm_rlc = sm_a_r
