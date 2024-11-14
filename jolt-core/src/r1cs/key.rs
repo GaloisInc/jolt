@@ -138,8 +138,8 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
         let uniform_r1cs = constraint_builder.materialize_uniform();
         let offset_eq_r1cs = constraint_builder.materialize_offset_eq();
 
-        let total_rows = constraint_builder.constraint_rows().next_power_of_two();
-        let num_steps = constraint_builder.uniform_repeat().next_power_of_two();
+        let total_rows = constraint_builder.constraint_rows(); // .next_power_of_two();
+        let num_steps = constraint_builder.uniform_repeat().next_power_of_two(); // TODO: Don't pad this?
 
         let vk_digest = Self::digest(&uniform_r1cs, &offset_eq_r1cs, num_steps);
 
@@ -312,14 +312,26 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
         let total_rows_bits = self.num_rows_total().log_2();
         let total_cols_bits = self.num_cols_total().log_2();
         let steps_bits: usize = self.num_steps.log_2();
-        let constraint_rows_bits = (self.uniform_r1cs.num_rows + 1).next_power_of_two().log_2();
+        let constraint_rows_bits = (self.uniform_r1cs.num_rows + 1).next_power_of_two().log_2(); // JP:
+                                                                                                 // Double
+                                                                                                 // check
+                                                                                                 // that
+                                                                                                 // this
+                                                                                                 // `+1`
+                                                                                                 // is
+                                                                                                 // there
+                                                                                                 // for
+                                                                                                 // prover
         let uniform_cols_bits = self.uniform_r1cs.num_vars.next_power_of_two().log_2();
         assert_eq!(r.len(), total_rows_bits + total_cols_bits);
         assert_eq!(total_rows_bits - steps_bits, constraint_rows_bits);
 
         // Deconstruct 'r' into representitive bits
         let (r_row, r_col) = r.split_at(total_rows_bits);
-        let (r_row_constr, r_row_step) = r_row.split_at(constraint_rows_bits);
+        let (r_row_step, r_row_constr) = r_row.split_at(total_rows_bits - constraint_rows_bits); // TMP
+        // let (r_row_constr, r_row_step) = r_row.split_at(constraint_rows_bits);
+        println!("r_row_constr: {}", r_row_constr.len());
+        println!("r_row_step: {}", r_row_step.len());
         let (r_col_var, r_col_step) = r_col.split_at(uniform_cols_bits + 1);
         assert_eq!(r_row_step.len(), r_col_step.len());
 

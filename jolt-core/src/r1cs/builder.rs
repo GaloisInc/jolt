@@ -536,7 +536,7 @@ pub struct CombinedUniformBuilder<const C: usize, F: JoltField, I: ConstraintInp
     uniform_builder: R1CSBuilder<C, F, I>,
 
     /// Padded to the nearest power of 2
-    uniform_repeat: usize,
+    uniform_repeat: usize, // JP: Does this still need to be padded?
 
     offset_equality_constraints: Vec<OffsetEqConstraint>,
 }
@@ -564,18 +564,24 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         }
     }
 
-    /// Total number of rows used across all uniform constraints across all repeats. Repeat padded to 2, but repeat * num_constraints not, num_constraints not.
-    pub(super) fn uniform_repeat_constraint_rows(&self) -> usize {
-        self.uniform_repeat * self.uniform_builder.constraints.len()
+    // /// Total number of rows used across all uniform constraints across all repeats. Repeat padded to 2, but repeat * num_constraints not, num_constraints not.
+    // pub(super) fn uniform_repeat_constraint_rows(&self) -> usize {
+    //     self.uniform_repeat * self.uniform_builder.constraints.len()
+    // }
+
+    // pub(super) fn offset_eq_constraint_rows(&self) -> usize {
+    //     self.uniform_repeat * self.offset_equality_constraints.len()
+    // }
+
+    /// Number of constraint rows per step, padded to the next power of two.
+    pub(super) fn padded_rows_per_step(&self) -> usize {
+        let num_constraints = self.uniform_builder.constraints.len() + self.offset_equality_constraints.len();
+        num_constraints.next_power_of_two()
     }
 
-    pub(super) fn offset_eq_constraint_rows(&self) -> usize {
-        self.uniform_repeat * self.offset_equality_constraints.len()
-    }
-
-    /// Total number of rows used across all repeated constraints. Not padded to nearest power of two.
+    /// Total number of rows used by all constraints. Implicitly padded to a multiple of a power of two.
     pub(super) fn constraint_rows(&self) -> usize {
-        self.offset_eq_constraint_rows() + self.uniform_repeat_constraint_rows()
+        self.uniform_repeat * self.padded_rows_per_step()
     }
 
     pub(super) fn uniform_repeat(&self) -> usize {
@@ -689,6 +695,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         SparsePolynomial<F>,
     ) {
         let num_constraints = self.uniform_builder.constraints.len() + self.offset_equality_constraints.len();
+        let padded_num_constraints = num_constraints.next_power_of_two();
 
         let span = tracing::span!(tracing::Level::DEBUG, "uniform and non-uniform constraints");
         let _enter = span.enter();
@@ -707,7 +714,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                         let evaluate_constraint = |lc: &LC| {
                             let item = lc.evaluate_row(step);
                             if !item.is_zero() {
-                                let global_index = step_index * num_constraints + constraint_index;
+                                let global_index = step_index * padded_num_constraints + constraint_index;
                                 Some((item, global_index))
                             } else {
                                 None
@@ -732,7 +739,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                     let eq_b_eval = eval_offset_lc(&constr.b, step, next_step_m);
 
                     let az = eq_a_eval - eq_b_eval;
-                    let global_index = step_index * num_constraints + self.uniform_builder.constraints.len() + constr_i;
+                    let global_index = step_index * padded_num_constraints + self.uniform_builder.constraints.len() + constr_i;
                     if !az.is_zero() {
                         az_sparse.push((az, global_index));
                     }
@@ -840,12 +847,13 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         let (az_sparse, bz_sparse, cz_sparse) = par_flatten_triple(
             step_evals,
             unsafe_allocate_sparse_zero_vec,
-            self.offset_eq_constraint_rows(),
+            0, // self.offset_eq_constraint_rows(),
         );
 
         drop(_enter);
 
         let num_vars = self.constraint_rows().next_power_of_two().log_2();
+        // let num_vars = self.constraint_rows().log_2(); // TODO: Do we need to round up?
         let az_poly = SparsePolynomial::new(num_vars, az_sparse);
         let bz_poly = SparsePolynomial::new(num_vars, bz_sparse);
         let cz_poly = SparsePolynomial::new(num_vars, cz_sparse);
