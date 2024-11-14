@@ -668,16 +668,16 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         SparsePolynomial<F>,
         SparsePolynomial<F>,
     ) {
-        // TODO: Get rid of this XXX
         let num_vars = flattened_polynomials.len();
         let num_steps = flattened_polynomials[0].len();
-        let mut transpose = vec![unsafe_allocate_zero_vec(num_vars);num_steps];
 
-        for i in 0..num_vars {
-            for j in 0..num_steps {
-                transpose[j][i] = flattened_polynomials[i][j];
+        let transpose = (0..num_steps).map(|step_index| {
+            let mut v = Vec::with_capacity(num_vars);
+            for var_index in 0..num_vars {
+                v.push(flattened_polynomials[var_index][step_index]);
             }
-        }
+            v
+        });
 
         self.compute_spartan_Az_Bz_Cz_transpose::<PCS, ProofTranscript>(transpose)
     }
@@ -688,7 +688,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         ProofTranscript: Transcript,
     >(
         &self,
-        flattened_polynomials: Vec<Vec<F>>, // &[&[F]], // S steps of (N variables)
+        flattened_polynomials: impl Iterator<Item = Vec<F>>, // S steps of (N variables)
     ) -> (
         SparsePolynomial<F>,
         SparsePolynomial<F>,
@@ -698,7 +698,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
 
         let span = tracing::span!(tracing::Level::DEBUG, "uniform and non-uniform constraints");
         let _enter = span.enter();
-        let step_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = tuple_windows(flattened_polynomials.iter())
+        let step_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = tuple_windows(flattened_polynomials)
             // .par_iter() // TODO: parallelize this.
             .enumerate()
             .map(|(step_index, (step, next_step_m))| {
@@ -711,7 +711,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                     .map(|(constraint_index, constraint)| {
                         // Evaluate a constraint on a given step.
                         let evaluate_constraint = |lc: &LC| {
-                            let item = lc.evaluate_row(step);
+                            let item = lc.evaluate_row(&step);
                             if !item.is_zero() {
                                 let global_index = step_index * padded_num_constraints + constraint_index;
                                 Some((item, global_index))
@@ -733,9 +733,9 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
 
                 // TODO: Compute this step in parallel...
                 for (constr_i, constr) in self.offset_equality_constraints.iter().enumerate() {
-                    let condition_eval = eval_offset_lc(&constr.cond, step, next_step_m);
-                    let eq_a_eval = eval_offset_lc(&constr.a, step, next_step_m);
-                    let eq_b_eval = eval_offset_lc(&constr.b, step, next_step_m);
+                    let condition_eval = eval_offset_lc(&constr.cond, &step, next_step_m.as_ref());
+                    let eq_a_eval = eval_offset_lc(&constr.a, &step, next_step_m.as_ref());
+                    let eq_b_eval = eval_offset_lc(&constr.b, &step, next_step_m.as_ref());
 
                     let az = eq_a_eval - eq_b_eval;
                     let global_index = step_index * padded_num_constraints + self.uniform_builder.constraints.len() + constr_i;
