@@ -166,6 +166,9 @@ where
             outer_sumcheck_claims[3],
         );
         ProofTranscript::append_scalars(transcript, [claim_Az, claim_Bz, claim_Cz].as_slice());
+        let _ = dbg!(claim_Az);
+        let _ = dbg!(claim_Bz);
+        let _ = dbg!(claim_Cz);
 
         // inner sum-check
         let r_inner_sumcheck_RLC: F = transcript.challenge_scalar();
@@ -176,10 +179,14 @@ where
         // this is the polynomial extended from the vector r_A * A(r_x, y) + r_B * B(r_x, y) + r_C * C(r_x, y) for all y
         let num_steps_bits = constraint_builder
             .uniform_repeat()
-            .next_power_of_two()
+            .next_power_of_two() // TODO: Don't pad this?
             .ilog2();
-        let (rx_con, rx_ts) =
-            outer_sumcheck_r.split_at(outer_sumcheck_r.len() - num_steps_bits as usize);
+        let total_row_bits = constraint_builder.constraint_rows().next_power_of_two().log_2();
+        let num_constr_bits = constraint_builder.padded_rows_per_step().ilog2() as usize;
+        assert_eq!(outer_sumcheck_r.len(), total_row_bits); // TMP
+        assert_eq!(outer_sumcheck_r.len(), dbg!(num_steps_bits) as usize + dbg!(num_constr_bits)); // TMP
+        let (rx_ts, rx_con) =
+            outer_sumcheck_r.split_at(outer_sumcheck_r.len() - num_constr_bits);
         let mut poly_ABC =
             DensePolynomial::new(key.evaluate_r1cs_mle_rlc(rx_con, rx_ts, r_inner_sumcheck_RLC));
 
@@ -191,6 +198,7 @@ where
                 &flattened_polys,
                 transcript,
             );
+        let _ = dbg!(_claims_inner);
         drop_in_background_thread(poly_ABC);
 
         // Requires 'r_col_segment_bits' to index the (const, segment). Within that segment we index the step using 'r_col_step'
@@ -298,6 +306,10 @@ where
         let _ = dbg!(self.claimed_witness_evals.len());
         let r = [r_x, r_y].concat();
         let (eval_a, eval_b, eval_c) = key.evaluate_r1cs_matrix_mles(&r);
+        let _ = dbg!(eval_a);
+        let _ = dbg!(eval_b);
+        let _ = dbg!(eval_c);
+        let _ = dbg!(eval_Z);
 
         let left_expected = eval_a
             + r_inner_sumcheck_RLC * eval_b
