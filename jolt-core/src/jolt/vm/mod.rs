@@ -362,7 +362,6 @@ where
         Option<ProverDebugInfo<F, ProofTranscript>>,
     ) {
         let trace_length = trace.len();
-        let padded_trace_length = trace_length.next_power_of_two();
         println!("Trace length: {}", trace_length);
 
         // TODO: Drop this?
@@ -405,7 +404,7 @@ where
         );
 
         let r1cs_builder = Self::Constraints::construct_constraints(
-            padded_trace_length,
+            trace_length,
             RAM_START_ADDRESS - program_io.memory_layout.ram_witness_offset,
         );
         let spartan_key = spartan::UniformSpartanProof::<
@@ -413,7 +412,7 @@ where
             <Self::Constraints as R1CSConstraints<C, F>>::Inputs,
             F,
             ProofTranscript,
-        >::setup(&r1cs_builder, padded_trace_length);
+        >::setup(&r1cs_builder, trace_length);
 
         let r1cs_polynomials = R1CSPolynomials::new::<
             C,
@@ -543,13 +542,13 @@ where
         Self::fiat_shamir_preamble(&mut transcript, &proof.program_io, proof.trace_length);
 
         // Regenerate the uniform Spartan key
-        let padded_trace_length = proof.trace_length.next_power_of_two();
+        let trace_length = proof.trace_length;
         let memory_start = RAM_START_ADDRESS - proof.program_io.memory_layout.ram_witness_offset;
         let r1cs_builder =
-            Self::Constraints::construct_constraints(padded_trace_length, memory_start);
+            Self::Constraints::construct_constraints(trace_length, memory_start);
         let spartan_key = spartan::UniformSpartanProof::<C, _, F, ProofTranscript>::setup(
             &r1cs_builder,
-            padded_trace_length,
+            trace_length, // TODO: FIXME
         );
         transcript.append_scalar(&spartan_key.vk_digest);
 

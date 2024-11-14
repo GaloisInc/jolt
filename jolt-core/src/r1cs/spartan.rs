@@ -89,11 +89,11 @@ where
     #[tracing::instrument(skip_all, name = "Spartan::setup")]
     pub fn setup(
         constraint_builder: &CombinedUniformBuilder<C, F, I>,
-        padded_num_steps: usize,
+        num_steps: usize,
     ) -> UniformSpartanKey<C, I, F> {
         assert_eq!(
-            padded_num_steps,
-            constraint_builder.uniform_repeat().next_power_of_two()
+            num_steps,
+            constraint_builder.uniform_repeat()
         );
         UniformSpartanKey::from_builder(constraint_builder)
     }

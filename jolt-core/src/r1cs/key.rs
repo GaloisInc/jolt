@@ -139,7 +139,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
         let uniform_r1cs = constraint_builder.materialize_uniform();
         let offset_eq_r1cs = constraint_builder.materialize_offset_eq();
 
-        let num_steps = constraint_builder.uniform_repeat().next_power_of_two(); // TODO: Don't pad this?
+        let num_steps = constraint_builder.uniform_repeat();
 
         let vk_digest = Self::digest(&uniform_r1cs, &offset_eq_r1cs, num_steps);
 

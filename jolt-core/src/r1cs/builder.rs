@@ -547,7 +547,6 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         uniform_repeat: usize,
         offset_equality_constraints: Vec<OffsetEqConstraint>,
     ) -> Self {
-        assert!(uniform_repeat.is_power_of_two());
         Self {
             uniform_builder,
             uniform_repeat,
