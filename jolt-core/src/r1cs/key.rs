@@ -25,7 +25,7 @@ pub struct UniformSpartanKey<const C: usize, I: ConstraintInput, F: JoltField> {
     pub offset_eq_r1cs: NonUniformR1CS<F>,
 
     /// Number of constraints across all steps padded to nearest power of 2
-    pub num_cons_total: usize,
+    pub num_cons_total: usize, // JP: Delete this?
 
     /// Number of steps padded to the nearest power of 2
     pub num_steps: usize,
@@ -111,6 +111,10 @@ impl<F: JoltField> NonUniformR1CS<F> {
         }
 
         (eq_constants, condition_constants)
+    }
+
+    fn num_constraints(&self) -> usize {
+        self.constraints.len() // JP: Should this have * 2???
     }
 }
 
@@ -311,19 +315,11 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
     pub fn evaluate_r1cs_matrix_mles(&self, r_row: &[F], r_col: &[F]) -> (F, F, F) {
         let total_rows_bits = r_row.len();
         let total_cols_bits = r_col.len();
-        let steps_bits: usize = self.num_steps.log_2();
-        let constraint_rows_bits = (self.uniform_r1cs.num_rows + 1).next_power_of_two().log_2(); // JP:
-                                                                                                 // Double
-                                                                                                 // check
-                                                                                                 // that
-                                                                                                 // this
-                                                                                                 // `+1`
-                                                                                                 // is
-                                                                                                 // there
-                                                                                                 // for
-                                                                                                 // prover
+        let constraint_rows_bits = (self.uniform_r1cs.num_rows + self.offset_eq_r1cs.num_constraints())
+            .next_power_of_two()
+            .log_2();
+        let steps_bits: usize = total_rows_bits - constraint_rows_bits;
         let uniform_cols_bits = self.uniform_r1cs.num_vars.next_power_of_two().log_2();
-        assert_eq!(total_rows_bits - steps_bits, constraint_rows_bits);
 
         // Deconstruct 'r_row' into representitive bits
         let (r_row_step, r_row_constr) = r_row.split_at(total_rows_bits - constraint_rows_bits); // TMP

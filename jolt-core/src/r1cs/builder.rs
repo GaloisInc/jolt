@@ -694,8 +694,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         SparsePolynomial<F>,
         SparsePolynomial<F>,
     ) {
-        let num_constraints = self.uniform_builder.constraints.len() + self.offset_equality_constraints.len();
-        let padded_num_constraints = num_constraints.next_power_of_two();
+        let padded_num_constraints = self.padded_rows_per_step();
 
         let span = tracing::span!(tracing::Level::DEBUG, "uniform and non-uniform constraints");
         let _enter = span.enter();
