@@ -115,7 +115,7 @@ where
             .map(|var| var.get_ref(polynomials))
             .collect();
 
-        let num_rounds_x = key.num_rows_total().log_2();
+        let num_rounds_x = key.num_rows_bits();
         let num_rounds_y = key.num_cols_total().log_2();
 
         // outer sum-check
@@ -226,7 +226,7 @@ where
         PCS: CommitmentScheme<ProofTranscript, Field = F>,
         ProofTranscript: Transcript,
     {
-        let num_rounds_x = key.num_rows_total().log_2();
+        let num_rounds_x = key.num_rows_bits();
         let num_rounds_y = key.num_cols_total().log_2();
 
         // outer sum-check
