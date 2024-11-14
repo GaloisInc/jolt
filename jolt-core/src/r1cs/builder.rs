@@ -853,7 +853,6 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         drop(_enter);
 
         let num_vars = self.constraint_rows().next_power_of_two().log_2();
-        // let num_vars = self.constraint_rows().log_2(); // TODO: Do we need to round up?
         let az_poly = SparsePolynomial::new(num_vars, az_sparse);
         let bz_poly = SparsePolynomial::new(num_vars, bz_sparse);
         let cz_poly = SparsePolynomial::new(num_vars, cz_sparse);
