@@ -283,8 +283,7 @@ where
         let r_y = inner_sumcheck_r.clone();
         let _ = dbg!(r_y.len());
         let _ = dbg!(self.claimed_witness_evals.len());
-        let r = [r_x, r_y].concat();
-        let (eval_a, eval_b, eval_c) = key.evaluate_r1cs_matrix_mles(&r);
+        let (eval_a, eval_b, eval_c) = key.evaluate_r1cs_matrix_mles(&r_x, &r_y);
         let _ = dbg!(eval_a);
         let _ = dbg!(eval_b);
         let _ = dbg!(eval_c);

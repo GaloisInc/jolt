@@ -308,9 +308,9 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
 
     /// Evaluates A(r), B(r), C(r) efficiently using their small uniform representations.
     #[tracing::instrument(skip_all, name = "UniformSpartanKey::evaluate_r1cs_matrix_mles")]
-    pub fn evaluate_r1cs_matrix_mles(&self, r: &[F]) -> (F, F, F) {
-        let total_rows_bits = self.num_rows_total().log_2();
-        let total_cols_bits = self.num_cols_total().log_2();
+    pub fn evaluate_r1cs_matrix_mles(&self, r_row: &[F], r_col: &[F]) -> (F, F, F) {
+        let total_rows_bits = r_row.len();
+        let total_cols_bits = r_col.len();
         let steps_bits: usize = self.num_steps.log_2();
         let constraint_rows_bits = (self.uniform_r1cs.num_rows + 1).next_power_of_two().log_2(); // JP:
                                                                                                  // Double
@@ -323,11 +323,9 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
                                                                                                  // for
                                                                                                  // prover
         let uniform_cols_bits = self.uniform_r1cs.num_vars.next_power_of_two().log_2();
-        assert_eq!(r.len(), total_rows_bits + total_cols_bits);
         assert_eq!(total_rows_bits - steps_bits, constraint_rows_bits);
 
-        // Deconstruct 'r' into representitive bits
-        let (r_row, r_col) = r.split_at(total_rows_bits);
+        // Deconstruct 'r_row' into representitive bits
         let (r_row_step, r_row_constr) = r_row.split_at(total_rows_bits - constraint_rows_bits); // TMP
         // let (r_row_constr, r_row_step) = r_row.split_at(constraint_rows_bits);
         println!("r_row_constr: {}", r_row_constr.len());
