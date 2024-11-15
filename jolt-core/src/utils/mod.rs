@@ -124,10 +124,10 @@ pub fn gen_random_point<F: JoltField>(memory_bits: usize) -> Vec<F> {
 }
 
 pub fn collect_and_flatten_triple<T>(iter: impl Iterator<Item = (Option<T>, Option<T>, Option<T>)>) -> (Vec<T>, Vec<T>, Vec<T>) {
-    // TODO: Allocate some size up front?
-    let mut xs = Vec::new();
-    let mut ys = Vec::new();
-    let mut zs = Vec::new();
+    let count = iter.size_hint().0;
+    let mut xs = Vec::with_capacity(count);
+    let mut ys = Vec::with_capacity(count);
+    let mut zs = Vec::with_capacity(count);
 
     for (mx, my, mz) in iter {
         if let Some(x) = mx {
