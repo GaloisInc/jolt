@@ -671,29 +671,37 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         let num_vars = flattened_polynomials.len();
         let num_steps = flattened_polynomials[0].len();
 
-        let transpose = (0..num_steps).into_par_iter().map(|step_index| {
+        let build_row = |step_index| {
             let mut v = Vec::with_capacity(num_vars);
             for var_index in 0..num_vars {
                 v.push(flattened_polynomials[var_index][step_index]);
             }
             v
-        });
+        };
 
-        self.compute_spartan_Az_Bz_Cz_transpose::<PCS, ProofTranscript>(transpose.collect())
-    }
+    //     let transpose = (0..num_steps).into_par_iter().map(|step_index| {
+    //         let mut v = Vec::with_capacity(num_vars);
+    //         for var_index in 0..num_vars {
+    //             v.push(flattened_polynomials[var_index][step_index]);
+    //         }
+    //         v
+    //     });
 
-    #[tracing::instrument(skip_all)]
-    pub fn compute_spartan_Az_Bz_Cz_transpose<
-        PCS: CommitmentScheme<ProofTranscript, Field = F>,
-        ProofTranscript: Transcript,
-    >(
-        &self,
-        flattened_polynomials: Vec<Vec<F>>, // impl Iterator<Item = Vec<F>>, // S steps of (N variables)
-    ) -> (
-        SparsePolynomial<F>,
-        SparsePolynomial<F>,
-        SparsePolynomial<F>,
-    ) {
+    //     self.compute_spartan_Az_Bz_Cz_transpose::<PCS, ProofTranscript>(transpose.collect())
+    // }
+
+    // #[tracing::instrument(skip_all)]
+    // pub fn compute_spartan_Az_Bz_Cz_transpose<
+    //     PCS: CommitmentScheme<ProofTranscript, Field = F>,
+    //     ProofTranscript: Transcript,
+    // >(
+    //     &self,
+    //     flattened_polynomials: Vec<Vec<F>>, // impl Iterator<Item = Vec<F>>, // S steps of (N variables)
+    // ) -> (
+    //     SparsePolynomial<F>,
+    //     SparsePolynomial<F>,
+    //     SparsePolynomial<F>,
+    // ) {
         let padded_num_constraints = self.padded_rows_per_step();
 
         // let test = vec![12,2,3,4,5];
@@ -707,11 +715,15 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         //     // .par_bridge()
         //     .map(|(step_index, (step, next_step_m))| {
 
-        let step_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = (0..flattened_polynomials.len())
+        let step_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = (0..num_steps)
             .into_par_iter()
             .map(|step_index| {
-                let step = &flattened_polynomials[step_index];
-                let next_step_m = flattened_polynomials.get(step_index+1);
+                let step = build_row(step_index); // &flattened_polynomials[step_index];
+                let next_step_m = if step_index+1 < num_steps { // flattened_polynomials.get(step_index+1);
+                    Some(build_row(step_index+1))
+                } else {
+                    None
+                };
 
                 let len = self.uniform_builder.constraints.len() + self.offset_equality_constraints.len();
                 let mut az_sparse = Vec::with_capacity(len);
@@ -754,9 +766,9 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                     .iter() // .par_iter()
                     .enumerate()
                     .for_each(|(constr_i, constr)| {
-                        let condition_eval = eval_offset_lc(&constr.cond, &step, next_step_m);
-                        let eq_a_eval = eval_offset_lc(&constr.a, &step, next_step_m);
-                        let eq_b_eval = eval_offset_lc(&constr.b, &step, next_step_m);
+                        let condition_eval = eval_offset_lc(&constr.cond, &step, next_step_m.as_ref());
+                        let eq_a_eval = eval_offset_lc(&constr.a, &step, next_step_m.as_ref());
+                        let eq_b_eval = eval_offset_lc(&constr.b, &step, next_step_m.as_ref());
 
                         let az = eq_a_eval - eq_b_eval;
                         let global_index = step_index * padded_num_constraints + self.uniform_builder.constraints.len() + constr_i;
