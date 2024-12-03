@@ -144,8 +144,9 @@ pub fn collect_and_flatten_triple<T>(iter: impl Iterator<Item = (Option<T>, Opti
     (xs, ys, zs)
 }
 
-pub fn tuple_windows<T>(mut iter: impl Iterator<Item = T>) -> impl Iterator<Item = (T, Option<T>)>
+pub fn tuple_windows<T, I>(mut iter: I) -> TupleWindows<I>
 where
+    I: Iterator<Item = T>,
     T: Clone,
 {
     let current = iter.next();
@@ -155,7 +156,7 @@ where
     }
 }
 
-struct TupleWindows<I: Iterator> {
+pub struct TupleWindows<I: Iterator> {
     iter: I,
     current: Option<I::Item>,
 }

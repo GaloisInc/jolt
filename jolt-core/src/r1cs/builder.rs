@@ -671,7 +671,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         let num_vars = flattened_polynomials.len();
         let num_steps = flattened_polynomials[0].len();
 
-        let transpose = (0..num_steps).map(|step_index| {
+        let transpose = (0..num_steps).into_par_iter().map(|step_index| {
             let mut v = Vec::with_capacity(num_vars);
             for var_index in 0..num_vars {
                 v.push(flattened_polynomials[var_index][step_index]);
@@ -679,7 +679,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
             v
         });
 
-        self.compute_spartan_Az_Bz_Cz_transpose::<PCS, ProofTranscript>(transpose)
+        self.compute_spartan_Az_Bz_Cz_transpose::<PCS, ProofTranscript>(transpose.collect())
     }
 
     #[tracing::instrument(skip_all)]
@@ -688,7 +688,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         ProofTranscript: Transcript,
     >(
         &self,
-        flattened_polynomials: impl Iterator<Item = Vec<F>>, // S steps of (N variables)
+        flattened_polynomials: Vec<Vec<F>>, // impl Iterator<Item = Vec<F>>, // S steps of (N variables)
     ) -> (
         SparsePolynomial<F>,
         SparsePolynomial<F>,
@@ -696,35 +696,52 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
     ) {
         let padded_num_constraints = self.padded_rows_per_step();
 
+        // let test = vec![12,2,3,4,5];
+        // let flattened_polynomials: Vec<Vec<F>> = flattened_polynomials.collect();
+
         let span = tracing::span!(tracing::Level::DEBUG, "uniform and non-uniform constraints");
         let _enter = span.enter();
-        let step_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = tuple_windows(flattened_polynomials)
-            // .par_iter() // TODO: parallelize this.
-            .enumerate()
-            .map(|(step_index, (step, next_step_m))| {
+        // let step_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = tuple_windows(flattened_polynomials)
+        //     // .par_iter() // TODO: parallelize this.
+        //     .enumerate()
+        //     // .par_bridge()
+        //     .map(|(step_index, (step, next_step_m))| {
+
+        let step_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = (0..flattened_polynomials.len())
+            .into_par_iter()
+            .map(|step_index| {
+                let step = &flattened_polynomials[step_index];
+                let next_step_m = flattened_polynomials.get(step_index+1);
+
+                let len = self.uniform_builder.constraints.len() + self.offset_equality_constraints.len();
+                let mut az_sparse = Vec::with_capacity(len);
+                let mut bz_sparse = Vec::with_capacity(len);
+                let mut cz_sparse = Vec::with_capacity(len);
+
                 // uniform_constraints
-                let (mut az_sparse, mut bz_sparse, cz_sparse): (Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>) = collect_and_flatten_triple(
-                    self.uniform_builder
+                // let (mut az_sparse, mut bz_sparse, cz_sparse): (Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>) = collect_and_flatten_triple(
+                self.uniform_builder
                     .constraints
-                    .iter() // TODO: .par_iter() XXX
+                    .iter() // .par_iter()
                     .enumerate()
-                    .map(|(constraint_index, constraint)| {
+                    .for_each(|(constraint_index, constraint)| {
+                        // dbg!(test[step_index]);
+                        //
+
                         // Evaluate a constraint on a given step.
-                        let evaluate_constraint = |lc: &LC| {
+                        let evaluate_constraint = |lc: &LC, sparse: &mut Vec<(F, usize)>| {
                             let item = lc.evaluate_row(&step);
                             if !item.is_zero() {
                                 let global_index = step_index * padded_num_constraints + constraint_index;
-                                Some((item, global_index))
-                            } else {
-                                None
+                                sparse.push((item, global_index))
                             }
                         };
 
-                        let a = evaluate_constraint(&constraint.a);
-                        let b = evaluate_constraint(&constraint.b);
-                        let c = evaluate_constraint(&constraint.c);
-                        (a, b, c)
-                    }));
+                        evaluate_constraint(&constraint.a, &mut az_sparse);
+                        evaluate_constraint(&constraint.b, &mut bz_sparse);
+                        evaluate_constraint(&constraint.c, &mut cz_sparse);
+                        // (a, (b, c))
+                    });
 
                 // offset_equality_constraints: Xz[uniform_constraint_rows..uniform_constraint_rows + 1]
                 // (a - b) * condition == 0
@@ -732,61 +749,70 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
 
 
                 // TODO: Compute this step in parallel...
-                for (constr_i, constr) in self.offset_equality_constraints.iter().enumerate() {
-                    let condition_eval = eval_offset_lc(&constr.cond, &step, next_step_m.as_ref());
-                    let eq_a_eval = eval_offset_lc(&constr.a, &step, next_step_m.as_ref());
-                    let eq_b_eval = eval_offset_lc(&constr.b, &step, next_step_m.as_ref());
+                // for (constr_i, constr) in self.offset_equality_constraints.iter().enumerate() {
+                self.offset_equality_constraints
+                    .iter() // .par_iter()
+                    .enumerate()
+                    .for_each(|(constr_i, constr)| {
+                        let condition_eval = eval_offset_lc(&constr.cond, &step, next_step_m);
+                        let eq_a_eval = eval_offset_lc(&constr.a, &step, next_step_m);
+                        let eq_b_eval = eval_offset_lc(&constr.b, &step, next_step_m);
 
-                    let az = eq_a_eval - eq_b_eval;
-                    let global_index = step_index * padded_num_constraints + self.uniform_builder.constraints.len() + constr_i;
-                    if !az.is_zero() {
-                        az_sparse.push((az, global_index));
-                    }
+                        let az = eq_a_eval - eq_b_eval;
+                        let global_index = step_index * padded_num_constraints + self.uniform_builder.constraints.len() + constr_i;
+                        if !az.is_zero() {
+                            az_sparse.push((az, global_index))
+                        }
 
-                    let bz = condition_eval;
-                    if !bz.is_zero() {
-                        bz_sparse.push((bz, global_index));
-                    }
+                        let bz = condition_eval;
+                        if !bz.is_zero() {
+                            bz_sparse.push((bz, global_index))
+                        }
 
-                    // (0..self.uniform_repeat).for_each(|step_index| {
-                    //     // Write corresponding values, if outside the step range, only include the constant.
-                    //     let a_step = step_index + constr.a.0 as usize;
-                    //     let b_step = step_index + constr.b.0 as usize;
-                    //     let a = eq_a_evals
-                    //         .get(a_step)
-                    //         .cloned()
-                    //         .unwrap_or(constr.a.1.constant_term_field());
-                    //     let b = eq_b_evals
-                    //         .get(b_step)
-                    //         .cloned()
-                    //         .unwrap_or(constr.b.1.constant_term_field());
-                    //     let az = a - b;
+                        // (0..self.uniform_repeat).for_each(|step_index| {
+                        //     // Write corresponding values, if outside the step range, only include the constant.
+                        //     let a_step = step_index + constr.a.0 as usize;
+                        //     let b_step = step_index + constr.b.0 as usize;
+                        //     let a = eq_a_evals
+                        //         .get(a_step)
+                        //         .cloned()
+                        //         .unwrap_or(constr.a.1.constant_term_field());
+                        //     let b = eq_b_evals
+                        //         .get(b_step)
+                        //         .cloned()
+                        //         .unwrap_or(constr.b.1.constant_term_field());
+                        //     let az = a - b;
 
-                    //     let global_index =
-                    //         uniform_constraint_rows + self.uniform_repeat * constr_i + step_index;
-                    //     if !az.is_zero() {
-                    //         az_sparse.push((az, global_index));
-                    //     }
+                        //     let global_index =
+                        //         uniform_constraint_rows + self.uniform_repeat * constr_i + step_index;
+                        //     if !az.is_zero() {
+                        //         az_sparse.push((az, global_index));
+                        //     }
 
-                    //     let condition_step = step_index + constr.cond.0 as usize;
-                    //     let bz = condition_evals
-                    //         .get(condition_step)
-                    //         .cloned()
-                    //         .unwrap_or(constr.cond.1.constant_term_field());
-                    //     if !bz.is_zero() {
-                    //         bz_sparse.push((bz, global_index));
-                    //     }
-                    // });
-                }
+                        //     let condition_step = step_index + constr.cond.0 as usize;
+                        //     let bz = condition_evals
+                        //         .get(condition_step)
+                        //         .cloned()
+                        //         .unwrap_or(constr.cond.1.constant_term_field());
+                        //     if !bz.is_zero() {
+                        //         bz_sparse.push((bz, global_index));
+                        //     }
+                        // });
+                });
 
-
-
-
-
-
+                // let (az_sparse, (bz_sparse, cz_sparse)): (Vec<Option<(F, usize)>>, (Vec<Option<(F, usize)>>, Vec<Option<(F, usize)>>)) = uniform
+                //     .chain(non_uniform)
+                //     .unzip();
 
 
 
+
+
+
+
+
+
+                // (az_sparse.into_iter().flatten().collect(), bz_sparse.into_iter().flatten().collect(), cz_sparse.into_iter().flatten().collect())
                 (az_sparse, bz_sparse, cz_sparse)
             }).collect();
 
