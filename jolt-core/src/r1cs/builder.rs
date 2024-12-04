@@ -521,11 +521,16 @@ impl OffsetEqConstraint {
 
 }
 
-pub(crate) fn eval_offset_lc<F: JoltField>(offset: &OffsetLC, step: &Vec<F>, next_step_m: Option<&Vec<F>>)  -> F {
+pub(crate) fn eval_offset_lc<F: JoltField>(
+    offset: &OffsetLC,
+    flattened_polynomials: &[&DensePolynomial<F>],
+    step: usize,
+    next_step_m: Option<usize>
+) -> F {
     if !offset.0 {
-        offset.1.evaluate_row(step)
+        offset.1.evaluate_row(flattened_polynomials, step)
     } else if let Some(next_step) = next_step_m {
-        offset.1.evaluate_row(next_step)
+        offset.1.evaluate_row(flattened_polynomials, next_step)
     } else {
         offset.1.constant_term_field()
     }
@@ -668,16 +673,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         SparsePolynomial<F>,
         SparsePolynomial<F>,
     ) {
-        let num_vars = flattened_polynomials.len();
         let num_steps = flattened_polynomials[0].len();
-
-        let build_row = |step_index| {
-            let mut v = Vec::with_capacity(num_vars);
-            for var_index in 0..num_vars {
-                v.push(flattened_polynomials[var_index][step_index]);
-            }
-            v
-        };
 
     //     let transpose = (0..num_steps).into_par_iter().map(|step_index| {
     //         let mut v = Vec::with_capacity(num_vars);
@@ -718,9 +714,8 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         let step_evals: Vec<(Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>)> = (0..num_steps)
             .into_par_iter()
             .map(|step_index| {
-                let step = build_row(step_index); // &flattened_polynomials[step_index];
-                let next_step_m = if step_index+1 < num_steps { // flattened_polynomials.get(step_index+1);
-                    Some(build_row(step_index+1))
+                let next_step_index_m = if step_index+1 < num_steps {
+                    Some(step_index+1)
                 } else {
                     None
                 };
@@ -742,7 +737,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
 
                         // Evaluate a constraint on a given step.
                         let evaluate_constraint = |lc: &LC, sparse: &mut Vec<(F, usize)>| {
-                            let item = lc.evaluate_row(&step);
+                            let item = lc.evaluate_row(flattened_polynomials, step_index);
                             if !item.is_zero() {
                                 let global_index = step_index * padded_num_constraints + constraint_index;
                                 sparse.push((item, global_index))
@@ -766,9 +761,9 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                     .iter() // .par_iter()
                     .enumerate()
                     .for_each(|(constr_i, constr)| {
-                        let condition_eval = eval_offset_lc(&constr.cond, &step, next_step_m.as_ref());
-                        let eq_a_eval = eval_offset_lc(&constr.a, &step, next_step_m.as_ref());
-                        let eq_b_eval = eval_offset_lc(&constr.b, &step, next_step_m.as_ref());
+                        let condition_eval = eval_offset_lc(&constr.cond, flattened_polynomials, step_index, next_step_index_m);
+                        let eq_a_eval = eval_offset_lc(&constr.a, flattened_polynomials, step_index, next_step_index_m);
+                        let eq_b_eval = eval_offset_lc(&constr.b, flattened_polynomials, step_index, next_step_index_m);
 
                         let az = eq_a_eval - eq_b_eval;
                         let global_index = step_index * padded_num_constraints + self.uniform_builder.constraints.len() + constr_i;
