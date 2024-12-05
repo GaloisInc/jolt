@@ -697,15 +697,13 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                     .for_each(|(constraint_index, constraint)| {
 
                         // Evaluate a constraint on a given step.
-                        let evaluate_constraint = |lc: &LC, sparse: &mut Vec<(F, usize)>| {
-                            let item = lc.evaluate_row(flattened_polynomials, step_index);
-                            if !item.is_zero() {
-                                let global_index = step_index * padded_num_constraints + constraint_index;
-                                sparse.push((item, global_index))
-                            }
-                        };
+                        let lc = uniform_constraint(constraint);
+                        let item = lc.evaluate_row(flattened_polynomials, step_index);
+                        if !item.is_zero() {
+                            let global_index = step_index * padded_num_constraints + constraint_index;
+                            sparse.push((item, global_index))
+                        }
 
-                        evaluate_constraint(uniform_constraint(constraint), &mut sparse);
                         // evaluate_constraint(&constraint.b, &mut bz_sparse);
                         // evaluate_constraint(&constraint.c, &mut cz_sparse);
                         // (a, (b, c))
@@ -920,21 +918,22 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         //     unsafe_allocate_sparse_zero_vec,
         //     0, // self.offset_eq_constraint_rows(),
         // );
-        let az_sparse = self.compute_spartan_Xz::<PCS,ProofTranscript,_,_>(flattened_polynomials, |constraint: &Constraint| &constraint.a, |flattened_polynomials, constr, step_index, next_step_index_m| {
+        let az_sparse = || self.compute_spartan_Xz::<PCS,ProofTranscript,_,_>(flattened_polynomials, |constraint: &Constraint| &constraint.a, |flattened_polynomials, constr, step_index, next_step_index_m| {
                         let eq_a_eval = eval_offset_lc(&constr.a, flattened_polynomials, step_index, next_step_index_m);
                         let eq_b_eval = eval_offset_lc(&constr.b, flattened_polynomials, step_index, next_step_index_m);
                         let az = eq_a_eval - eq_b_eval;
                         az
 
         });
-        let bz_sparse = self.compute_spartan_Xz::<PCS,ProofTranscript,_,_>(flattened_polynomials, |constraint: &Constraint| &constraint.b, |flattened_polynomials, constr, step_index, next_step_index_m| {
+        let bz_sparse = || self.compute_spartan_Xz::<PCS,ProofTranscript,_,_>(flattened_polynomials, |constraint: &Constraint| &constraint.b, |flattened_polynomials, constr, step_index, next_step_index_m| {
                         let condition_eval = eval_offset_lc(&constr.cond, flattened_polynomials, step_index, next_step_index_m);
                         let bz = condition_eval;
                         bz
         });
-        let cz_sparse = self.compute_spartan_Xz::<PCS,ProofTranscript,_,_>(flattened_polynomials, |constraint: &Constraint| &constraint.c, |_, _, _, _| {
+        let cz_sparse = || self.compute_spartan_Xz::<PCS,ProofTranscript,_,_>(flattened_polynomials, |constraint: &Constraint| &constraint.c, |_, _, _, _| {
             F::zero()
         });
+        let (az_sparse, (bz_sparse, cz_sparse)) = rayon::join(az_sparse, || rayon::join(bz_sparse, cz_sparse));
 
         drop(_enter);
 
