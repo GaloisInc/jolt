@@ -692,7 +692,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                     .constraints
                     .par_iter()
                     .enumerate()
-                    .flat_map_iter(move |(constraint_index, constraint)| {
+                    .flat_map(move |(constraint_index, constraint)| {
 
                         // Evaluate a constraint on a given step.
                         let lc = uniform_constraint(constraint);
@@ -722,7 +722,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                 let non_uniform_constraints = self.offset_equality_constraints
                     .par_iter()
                     .enumerate()
-                    .flat_map_iter(move |(constr_i, constr)| {
+                    .flat_map(move |(constr_i, constr)| {
                         let xz = offset_constraint(flattened_polynomials, constr, step_index, next_step_index_m);
                         let global_index = step_index * padded_num_constraints + self.uniform_builder.constraints.len() + constr_i;
                         if !xz.is_zero() {
