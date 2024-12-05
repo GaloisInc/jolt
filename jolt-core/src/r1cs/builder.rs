@@ -674,6 +674,21 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         let num_steps = flattened_polynomials[0].len();
         let padded_num_constraints = self.padded_rows_per_step();
 
+        // Filter out constraints that won't contribute ahead of time.
+        let filtered_uniform_constraints = self.uniform_builder
+            .constraints
+            .iter()
+            .enumerate()
+            .filter_map(|(index, constraint)| {
+                let lc = uniform_constraint(constraint);
+                if lc.terms().is_empty() {
+                    None
+                } else {
+                    Some((index, lc))
+                }
+            })
+            .collect::<Vec<_>>();
+
         (0..num_steps)
             .into_par_iter()
             .flat_map_iter(|step_index| {
@@ -687,29 +702,18 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
                 // let mut sparse = Vec::with_capacity(len);
 
                 // uniform_constraints
-                // let (mut az_sparse, mut bz_sparse, cz_sparse): (Vec<(F, usize)>, Vec<(F, usize)>, Vec<(F, usize)>) = collect_and_flatten_triple(
-                let uniform_constraints = self.uniform_builder
-                    .constraints
+                let uniform_constraints = filtered_uniform_constraints
                     .par_iter()
-                    .enumerate()
-                    .flat_map(move |(constraint_index, constraint)| {
+                    .flat_map(move |(constraint_index, lc)| {
 
                         // Evaluate a constraint on a given step.
-                        let lc = uniform_constraint(constraint);
-                        // let evaluate_constraint = |lc: &LC, sparse: &mut Vec<(F, usize)>| {
-                            let item = lc.evaluate_row(flattened_polynomials, step_index);
-                            if !item.is_zero() {
-                                let global_index = step_index * padded_num_constraints + constraint_index;
-                                Some((item, global_index))
-                            } else {
-                                None
-                            }
-                        // };
-
-                        // evaluate_constraint(uniform_constraint(constraint), &mut sparse);
-                        // evaluate_constraint(&constraint.b, &mut bz_sparse);
-                        // evaluate_constraint(&constraint.c, &mut cz_sparse);
-                        // (a, (b, c))
+                        let item = lc.evaluate_row(flattened_polynomials, step_index);
+                        if !item.is_zero() {
+                            let global_index = step_index * padded_num_constraints + constraint_index;
+                            Some((item, global_index))
+                        } else {
+                            None
+                        }
                     });
 
                 // offset_equality_constraints: Xz[uniform_constraint_rows..uniform_constraint_rows + 1]
