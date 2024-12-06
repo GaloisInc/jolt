@@ -6,8 +6,6 @@ use super::{
 };
 use crate::utils::{
     transcript::Transcript,
-    collect_and_flatten_triple,
-    tuple_windows,
 };
 use crate::{
     field::JoltField,
@@ -17,7 +15,7 @@ use crate::{
     utils::{
         math::Math,
         mul_0_1_optimized,
-        thread::{par_flatten_triple, unsafe_allocate_sparse_zero_vec, unsafe_allocate_zero_vec},
+        thread::{unsafe_allocate_zero_vec},
     },
 };
 use rayon::prelude::*;
