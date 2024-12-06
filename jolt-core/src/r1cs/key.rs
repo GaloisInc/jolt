@@ -317,8 +317,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
     pub fn evaluate_r1cs_matrix_mles(&self, r_row: &[F], r_col: &[F]) -> (F, F, F) {
         let total_rows_bits = r_row.len();
         let total_cols_bits = r_col.len();
-        let constraint_rows_bits = self.padded_row_constraint_per_step()
-            .log_2();
+        let constraint_rows_bits = self.padded_row_constraint_per_step().log_2();
         let steps_bits: usize = total_rows_bits - constraint_rows_bits;
         let uniform_cols_bits = self.uniform_r1cs.num_vars.next_power_of_two().log_2();
 

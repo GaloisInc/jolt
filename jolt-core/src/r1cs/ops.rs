@@ -114,8 +114,7 @@ impl LC {
         flattened_polynomials: &[&DensePolynomial<F>],
         row: usize,
     ) -> F {
-        self
-            .terms()
+        self.terms()
             .iter()
             .map(|term| match term.0 {
                 Variable::Input(var_index) | Variable::Auxiliary(var_index) => {
