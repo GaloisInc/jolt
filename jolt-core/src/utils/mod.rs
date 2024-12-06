@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 use crate::field::JoltField;
 
 use ark_std::test_rng;

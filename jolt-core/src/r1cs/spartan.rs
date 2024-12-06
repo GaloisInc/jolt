@@ -156,14 +156,7 @@ where
             + r_inner_sumcheck_RLC * r_inner_sumcheck_RLC * claim_Cz;
 
         // this is the polynomial extended from the vector r_A * A(r_x, y) + r_B * B(r_x, y) + r_C * C(r_x, y) for all y
-        let num_steps_bits = constraint_builder
-            .uniform_repeat()
-            .next_power_of_two() // TODO: Don't pad this?
-            .ilog2();
-        let total_row_bits = constraint_builder.constraint_rows().next_power_of_two().log_2();
         let num_constr_bits = constraint_builder.padded_rows_per_step().ilog2() as usize;
-        assert_eq!(outer_sumcheck_r.len(), total_row_bits); // TMP
-        assert_eq!(outer_sumcheck_r.len(), dbg!(num_steps_bits) as usize + dbg!(num_constr_bits)); // TMP
         let (rx_ts, rx_con) =
             outer_sumcheck_r.split_at(outer_sumcheck_r.len() - num_constr_bits);
         let mut poly_ABC =
@@ -177,7 +170,6 @@ where
                 &flattened_polys,
                 transcript,
             );
-        let _ = dbg!(_claims_inner);
         drop_in_background_thread(poly_ABC);
 
         // Requires 'r_col_segment_bits' to index the (const, segment). Within that segment we index the step using 'r_col_step'
@@ -234,7 +226,6 @@ where
             .map(|_i| transcript.challenge_scalar())
             .collect::<Vec<F>>();
 
-        println!("verify 1");
         let (claim_outer_final, r_x) = self
             .outer_sumcheck_proof
             .verify(F::zero(), num_rounds_x, 3, transcript)
@@ -266,28 +257,18 @@ where
             + r_inner_sumcheck_RLC * self.outer_sumcheck_claims.1
             + r_inner_sumcheck_RLC * r_inner_sumcheck_RLC * self.outer_sumcheck_claims.2;
 
-        println!("verify 2");
         let (claim_inner_final, inner_sumcheck_r) = self
             .inner_sumcheck_proof
             .verify(claim_inner_joint, num_rounds_y, 2, transcript)
             .map_err(|_| SpartanError::InvalidInnerSumcheckProof)?;
-        println!("verify 3");
 
         // n_prefix = n_segments + 1
         let n_prefix = key.uniform_r1cs.num_vars.next_power_of_two().log_2() + 1;
-        let _ = dbg!(n_prefix);
-        let _ = dbg!(r_x.len());
 
         let eval_Z = key.evaluate_z_mle(&self.claimed_witness_evals, &inner_sumcheck_r);
 
         let r_y = inner_sumcheck_r.clone();
-        let _ = dbg!(r_y.len());
-        let _ = dbg!(self.claimed_witness_evals.len());
         let (eval_a, eval_b, eval_c) = key.evaluate_r1cs_matrix_mles(&r_x, &r_y);
-        let _ = dbg!(eval_a);
-        let _ = dbg!(eval_b);
-        let _ = dbg!(eval_c);
-        let _ = dbg!(eval_Z);
 
         let left_expected = eval_a
             + r_inner_sumcheck_RLC * eval_b
@@ -295,10 +276,8 @@ where
         let right_expected = eval_Z;
         let claim_inner_final_expected = left_expected * right_expected;
         if claim_inner_final != claim_inner_final_expected {
-            panic!();
             return Err(SpartanError::InvalidInnerSumcheckClaim);
         }
-        println!("verify 4");
 
         let flattened_commitments: Vec<_> = I::flatten::<C>()
             .iter()
@@ -312,7 +291,6 @@ where
             transcript,
         );
 
-        println!("verify 5");
         Ok(())
     }
 }

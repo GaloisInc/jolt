@@ -110,8 +110,9 @@ impl<F: JoltField> NonUniformR1CS<F> {
         (eq_constants, condition_constants)
     }
 
+    /// Unpadded number of non-uniform constraints.
     fn num_constraints(&self) -> usize {
-        self.constraints.len() // JP: Should this have * 2???
+        self.constraints.len()
     }
 }
 
@@ -139,7 +140,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
         let uniform_r1cs = constraint_builder.materialize_uniform();
         let offset_eq_r1cs = constraint_builder.materialize_offset_eq();
 
-        let num_steps = constraint_builder.uniform_repeat().next_power_of_two(); // TODO: Don't pad this?
+        let num_steps = constraint_builder.uniform_repeat().next_power_of_two(); // TODO(JP): Number of steps no longer need to be padded.
 
         let vk_digest = Self::digest(&uniform_r1cs, &offset_eq_r1cs, num_steps);
 
@@ -168,7 +169,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
 
     /// Padded number of constraint rows per step.
     pub fn padded_row_constraint_per_step(&self) -> usize {
-        // JP: This is redundant with `padded_rows_per_step`... Can we reuse that instead?
+        // JP: This is redundant with `padded_rows_per_step`. Can we reuse that instead?
         (self.uniform_r1cs.num_rows + self.offset_eq_r1cs.num_constraints()).next_power_of_two()
     }
 
@@ -180,9 +181,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
 
     /// Evaluates A(r_x, y) + r_rlc * B(r_x, y) + r_rlc^2 * C(r_x, y) where r_x = r_constr || r_step for all y.
     #[tracing::instrument(skip_all, name = "UniformSpartanKey::evaluate_r1cs_mle_rlc")]
-    pub fn evaluate_r1cs_mle_rlc(&self, r_constr: &[F], r_step: &[F], r_rlc: F) -> Vec<F> { // Column vec, y in 0..|vars|
-        // TODO: Compute this in the new order..
-
+    pub fn evaluate_r1cs_mle_rlc(&self, r_constr: &[F], r_step: &[F], r_rlc: F) -> Vec<F> {
         assert_eq!(
             r_constr.len(),
             (self.uniform_r1cs.num_rows + 1).next_power_of_two().log_2()
@@ -325,9 +324,6 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> UniformSpartanKey<C, I, F
 
         // Deconstruct 'r_row' into representitive bits
         let (r_row_step, r_row_constr) = r_row.split_at(total_rows_bits - constraint_rows_bits); // TMP
-        // let (r_row_constr, r_row_step) = r_row.split_at(constraint_rows_bits);
-        println!("r_row_constr: {}", r_row_constr.len());
-        println!("r_row_step: {}", r_row_step.len());
         let (r_col_var, r_col_step) = r_col.split_at(uniform_cols_bits + 1);
         assert_eq!(r_row_step.len(), r_col_step.len());
 
