@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1738098748563,
+  "lastUpdate": 1738102295388,
   "repoUrl": "https://github.com/GaloisInc/jolt",
   "entries": {
     "Benchmarks": [
@@ -137,6 +137,54 @@ window.BENCHMARK_DATA = {
           "url": "https://github.com/GaloisInc/jolt/commit/6e6e1aa101bde699fc75539193ec8a5c701cce99"
         },
         "date": 1738098746494,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "fibonacci-time",
+            "value": 0,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "fibonacci-mem",
+            "value": 1024,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "muldiv-time",
+            "value": 0,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "muldiv-mem",
+            "value": 1024,
+            "unit": "KB",
+            "extra": ""
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "aditya.zutshi@galois.com",
+            "name": "Aditya Zutshi",
+            "username": "zutshi"
+          },
+          "committer": {
+            "email": "aditya.zutshi@galois.com",
+            "name": "Aditya Zutshi",
+            "username": "zutshi"
+          },
+          "distinct": true,
+          "id": "786553655803e0f4adc4fc51bfd40a36cc589a3d",
+          "message": "debug: time is 0",
+          "timestamp": "2025-01-28T14:07:37-08:00",
+          "tree_id": "f384379a85a1b01c6b2cb1cf09b484e26dd0f369",
+          "url": "https://github.com/GaloisInc/jolt/commit/786553655803e0f4adc4fc51bfd40a36cc589a3d"
+        },
+        "date": 1738102293328,
         "tool": "customSmallerIsBetter",
         "benches": [
           {
