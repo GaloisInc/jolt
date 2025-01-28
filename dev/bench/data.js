@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1738103103961,
+  "lastUpdate": 1738104214655,
   "repoUrl": "https://github.com/GaloisInc/jolt",
   "entries": {
     "Benchmarks": [
@@ -244,6 +244,42 @@ window.BENCHMARK_DATA = {
           {
             "name": "muldiv-mem",
             "value": 1024,
+            "unit": "KB",
+            "extra": ""
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "aditya.zutshi@galois.com",
+            "name": "Aditya Zutshi",
+            "username": "zutshi"
+          },
+          "committer": {
+            "email": "aditya.zutshi@galois.com",
+            "name": "Aditya Zutshi",
+            "username": "zutshi"
+          },
+          "distinct": true,
+          "id": "b6d1da63dd0488c283e91e0dcf86cf1f16d450d1",
+          "message": "bugfix: time is 0",
+          "timestamp": "2025-01-28T14:39:27-08:00",
+          "tree_id": "55b50e1e0063c3fdb95e9a4386494938ba8f7cc5",
+          "url": "https://github.com/GaloisInc/jolt/commit/b6d1da63dd0488c283e91e0dcf86cf1f16d450d1"
+        },
+        "date": 1738104212699,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "muldiv-time",
+            "value": 88.93,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "muldiv-mem",
+            "value": 3661628,
             "unit": "KB",
             "extra": ""
           }
