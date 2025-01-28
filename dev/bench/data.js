@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1735712233353,
+  "lastUpdate": 1738098748563,
   "repoUrl": "https://github.com/GaloisInc/jolt",
   "entries": {
     "Benchmarks": [
@@ -113,6 +113,54 @@ window.BENCHMARK_DATA = {
             "name": "stdlib",
             "value": 225.35,
             "unit": "s",
+            "extra": ""
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "aditya.zutshi@galois.com",
+            "name": "Aditya Zutshi",
+            "username": "zutshi"
+          },
+          "committer": {
+            "email": "aditya.zutshi@galois.com",
+            "name": "Aditya Zutshi",
+            "username": "zutshi"
+          },
+          "distinct": true,
+          "id": "6e6e1aa101bde699fc75539193ec8a5c701cce99",
+          "message": "bugfix: terminated json properly.",
+          "timestamp": "2025-01-28T13:08:53-08:00",
+          "tree_id": "a3d2e8421aa1358a6828c899a273ff397ac5d054",
+          "url": "https://github.com/GaloisInc/jolt/commit/6e6e1aa101bde699fc75539193ec8a5c701cce99"
+        },
+        "date": 1738098746494,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "fibonacci-time",
+            "value": 0,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "fibonacci-mem",
+            "value": 1024,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "muldiv-time",
+            "value": 0,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "muldiv-mem",
+            "value": 1024,
+            "unit": "KB",
             "extra": ""
           }
         ]
