@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1738137938082,
+  "lastUpdate": 1738707973197,
   "repoUrl": "https://github.com/GaloisInc/jolt",
   "entries": {
     "Benchmarks": [
@@ -394,6 +394,138 @@ window.BENCHMARK_DATA = {
           {
             "name": "stdlib-mem",
             "value": 4682044,
+            "unit": "KB",
+            "extra": ""
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jprider63@users.noreply.github.com",
+            "name": "JP",
+            "username": "jprider63"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9cc12ee0d2fadea42d495e494342d12a50915db0",
+          "message": "Merge pull request #2 from GaloisInc/feature/CI-plot-benchmarks\n\nTrigger benchmark CI on updates to main",
+          "timestamp": "2025-02-04T16:58:35-05:00",
+          "tree_id": "801d35fcc7dc973df6677c238310ede59d48535f",
+          "url": "https://github.com/GaloisInc/jolt/commit/9cc12ee0d2fadea42d495e494342d12a50915db0"
+        },
+        "date": 1738707971871,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "alloc-time",
+            "value": 1.8835,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "alloc-mem",
+            "value": 3400052,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "fibonacci-time",
+            "value": 1.7641,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "fibonacci-mem",
+            "value": 3394428,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "memory-ops-time",
+            "value": 1.7206,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "memory-ops-mem",
+            "value": 3394184,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "muldiv-time",
+            "value": 1.7006,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "muldiv-mem",
+            "value": 3389428,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "multi-function-time",
+            "value": 1.6497,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "multi-function-mem",
+            "value": 4609408,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "sha2-chain-time",
+            "value": 63.2477,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "sha2-chain-mem",
+            "value": 11116704,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "sha2-ex-time",
+            "value": 2.5527,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "sha2-ex-mem",
+            "value": 3394708,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "sha3-ex-time",
+            "value": 3.5148,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "sha3-ex-mem",
+            "value": 3394368,
+            "unit": "KB",
+            "extra": ""
+          },
+          {
+            "name": "stdlib-time",
+            "value": 2.4392,
+            "unit": "s",
+            "extra": ""
+          },
+          {
+            "name": "stdlib-mem",
+            "value": 4677720,
             "unit": "KB",
             "extra": ""
           }
