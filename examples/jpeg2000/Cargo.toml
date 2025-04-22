@@ -1,0 +1,11 @@
+[package]
+name = "jpeg2000"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+jolt-sdk = { path = "../../jolt-sdk", features = ["host"] }
+guest = { package = "jpeg2000-guest", path = "./guest" }
+
+[features]
+icicle = ["jolt-sdk/icicle"]

@@ -1,0 +1,12 @@
+[package]
+name = "jpeg2000-guest"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+guest = []
+
+[dependencies]
+serde = "1.0.219"
+#serde-big-array = "0.5.1"
+jolt = { package = "jolt-sdk", path = "../../../jolt-sdk" }
