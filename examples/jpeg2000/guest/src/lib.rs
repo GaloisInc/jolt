@@ -7,17 +7,17 @@ use serde::{Deserialize, Serialize};
 use core::fmt;
 use serde::{
     de::{SeqAccess, Visitor},
-    ser::{SerializeSeq, Serializer},
+    ser::{SerializeTuple, Serializer},
     Deserializer,
 };
 
-const N: usize = 1000;
+pub const N: usize = 1000;
 #[derive(Clone)]
 pub struct MyArray([u8; N]);
 
 impl Default for MyArray {
     fn default() -> Self {
-        MyArray([0u8; 1000])
+        MyArray([0u8; N])
     }
 }
 
@@ -26,11 +26,11 @@ impl Serialize for MyArray {
     where
         S: Serializer,
     {
-        let mut seq = serializer.serialize_seq(Some(N))?;
-        for element in self.0.iter() {
-            seq.serialize_element(element)?;
+        let mut tup = serializer.serialize_tuple(N)?;
+        for &b in &self.0 {
+            tup.serialize_element(&b)?;
         }
-        seq.end()
+        tup.end()
     }
 }
 
@@ -45,52 +45,29 @@ impl<'de> Deserialize<'de> for MyArray {
             type Value = MyArray;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("an array")
+                formatter.write_str("an array of length N")
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<MyArray, A::Error>
             where
                 A: SeqAccess<'de>,
             {
-                let mut arr = [0; N];
+                let mut arr = [0u8; N];
                 for i in 0..N {
                     arr[i] = seq
                         .next_element()?
                         .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
                 }
+                // ensure there are no extra elements
+                if let Some(_) = seq.next_element::<u8>()? {
+                    return Err(serde::de::Error::invalid_length(N + 1, &self));
+                }
                 Ok(MyArray(arr))
             }
         }
 
-        deserializer.deserialize_seq(ArrayVisitor)
+        deserializer.deserialize_tuple(N, ArrayVisitor)
     }
-}
-
-#[jolt::provable]
-fn collatz_convergence_range(start: u128, end: u128) -> u128 {
-    let mut max_num_steps = 0;
-    for n in start..end {
-        let num_steps = collatz_convergence(n);
-        if num_steps > max_num_steps {
-            max_num_steps = num_steps;
-        }
-    }
-    max_num_steps
-}
-
-#[jolt::provable]
-fn collatz_convergence(n: u128) -> u128 {
-    let mut n = n;
-    let mut num_steps = 0;
-    while n != 1 {
-        if n % 2 == 0 {
-            n /= 2;
-        } else {
-            n += (n << 1) + 1;
-        }
-        num_steps += 1;
-    }
-    return num_steps;
 }
 
 // #[jolt::provable(max_input_size = 10000, max_output_size = 10000)]
@@ -103,14 +80,27 @@ fn collatz_convergence(n: u128) -> u128 {
 impl MyArray {
     pub fn new(data: &[u8]) -> Self {
         let mut buffer = [0u8; N];
-        buffer.copy_from_slice(data);
+        let len = data.len();
+        if len > N {
+            panic!("Data is too long");
+        }
+        for i in 0..len {
+            buffer[i] = data[i];
+        }
+        for i in len..N {
+            buffer[i] = 0;
+        }
+
         MyArray(buffer)
     }
 }
 
 #[jolt::provable]
-pub fn jpeg2000(data: MyArray) -> bool {
-    return validate_jpeg2k(data.0.as_ref());
+pub fn jpeg2000(data: MyArray, len: usize) -> bool {
+    // Get a slice of MyArray of size len
+    let data_slice = &data.0[0..len];
+
+    return validate_jpeg2k(data_slice);
 }
 
 pub fn validate_jpeg2k(data: &[u8]) -> bool {

@@ -2,20 +2,9 @@ use guest::MyArray;
 use std::time::Instant;
 
 pub fn main() {
-    // Prove/verify convergence for a single number:
+    // Prove/verify jpeg2000:
     let target_dir = "/tmp/jolt-guest-targets";
-    /*
-    let program = guest::compile_collatz_convergence(target_dir);
 
-    let prover_preprocessing = guest::preprocess_prover_collatz_convergence(&program);
-    let verifier_preprocessing = guest::preprocess_verifier_collatz_convergence(&program);
-
-    let prove_collatz_single =
-        guest::build_prover_collatz_convergence(program, prover_preprocessing);
-    let verify_collatz_single = guest::build_verifier_collatz_convergence(verifier_preprocessing);
-    */
-
-    // This is for jpeg2000
     let program_jpeg2000 = guest::compile_jpeg2000(target_dir);
     let prover_jpeg2000_preprocessing = guest::preprocess_prover_jpeg2000(&program_jpeg2000);
     let verifier_jpeg2000_preprocessing = guest::preprocess_verifier_jpeg2000(&program_jpeg2000);
@@ -24,14 +13,20 @@ pub fn main() {
     let verify_jpeg2000 = guest::build_verifier_jpeg2000(verifier_jpeg2000_preprocessing);
 
     // prove jpeg2000
-
     let now = Instant::now();
     let jpeg2000_data = include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/ex.jp2");
+    let image_len = jpeg2000_data.len();
     let image = MyArray::new(jpeg2000_data);
 
-    let (output, proof) = prove_jpeg2000(image.clone());
+    let (output, proof) = prove_jpeg2000(image.clone(), image_len);
     println!("Prover jpeg2000 runtime: {} s", now.elapsed().as_secs_f64());
-    let is_valid = verify_jpeg2000(image, output, proof);
+
+    let now = Instant::now();
+    let is_valid = verify_jpeg2000(image, image_len, output, proof);
+    println!(
+        "Verifier jpeg2000 runtime: {} s",
+        now.elapsed().as_secs_f64()
+    );
     println!("valid: {}", is_valid);
     /*
     let now = Instant::now();

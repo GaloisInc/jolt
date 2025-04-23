@@ -1991,6 +1991,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpeg2000"
+version = "0.1.0"
+dependencies = [
+ "jolt-sdk",
+ "jpeg2000-guest",
+]
+
+[[package]]
+name = "jpeg2000-guest"
+version = "0.1.0"
+dependencies = [
+ "jolt-sdk",
+ "serde",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.77"
 source = "registry+https://github.com/rust-lang/crates.io-index"
