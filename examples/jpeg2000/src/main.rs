@@ -14,7 +14,10 @@ pub fn main() {
 
     // prove jpeg2000
     let now = Instant::now();
-    let jpeg2000_data = include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/ex.jp2");
+    //let jpeg2000_data = include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/ex.jp2");
+    //let jpeg2000_data =
+    //    include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/Small-fire45KB.jp2");
+    let jpeg2000_data = include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/relax.jp2");
     let image_len = jpeg2000_data.len();
     let image = MyArray::new(jpeg2000_data);
 
