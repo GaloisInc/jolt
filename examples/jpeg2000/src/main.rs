@@ -14,11 +14,14 @@ pub fn main() {
 
     // prove jpeg2000
     let now = Instant::now();
-    //let jpeg2000_data = include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/ex.jp2");
+    let jpeg2000_data = include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/ex.jp2");
     //let jpeg2000_data =
     //    include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/Small-fire45KB.jp2");
-    let jpeg2000_data = include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/relax.jp2");
+    //let jpeg2000_data =
+    //    include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/Stonks80KB.jp2");
+    //let jpeg2000_data = include_bytes!("/Users/benoit/SIEVE/CERRIDWEN/ACTECP/images/relax.jp2");
     let image_len = jpeg2000_data.len();
+    println!("image_len {}", image_len);
     let image = MyArray::new(jpeg2000_data);
 
     let (output, proof) = prove_jpeg2000(image.clone(), image_len);

@@ -11,7 +11,10 @@ use serde::{
     Deserializer,
 };
 
-pub const N: usize = 100000;
+// pub const N: usize = 300;
+// pub const N: usize = 50000;
+pub const N: usize = 50000;
+
 #[derive(Clone)]
 pub struct MyArray([u8; N]);
 
@@ -95,15 +98,30 @@ impl MyArray {
     }
 }
 
-#[jolt::provable]
+//#[jolt::provable(max_input_size = 100000, max_output_size = 10000)]
+#[jolt::provable(
+    max_input_size = 10_000,
+    max_output_size = 100,
+    stack_size = 100,
+    memory_size = 10_000
+)]
 pub fn jpeg2000(data: MyArray, len: usize) -> bool {
     // Get a slice of MyArray of size len
     let data_slice = &data.0[0..len];
 
-    return validate_jpeg2k(data_slice);
+    return traverse(data_slice);
+    //return validate_jpeg2k(data_slice);
 }
 
 const mem_size_of_u32: u32 = 4u32;
+
+pub fn traverse(data: &[u8]) -> bool {
+    let mut sum = 0u8;
+    for d in data {
+        sum |= *d;
+    }
+    return sum == 0;
+}
 
 pub fn validate_jpeg2k(data: &[u8]) -> bool {
     let mut pos: usize = 0; // Current index in the image
