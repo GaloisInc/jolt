@@ -13,7 +13,7 @@ use serde::{
 
 // pub const N: usize = 300;
 // pub const N: usize = 50000;
-pub const N: usize = 50000;
+pub const N: usize = 500;
 
 #[derive(Clone)]
 pub struct MyArray([u8; N]);
@@ -100,10 +100,10 @@ impl MyArray {
 
 //#[jolt::provable(max_input_size = 100000, max_output_size = 10000)]
 #[jolt::provable(
-    max_input_size = 10_000,
+    max_input_size = 10_000_000,
     max_output_size = 100,
-    stack_size = 100,
-    memory_size = 10_000
+    stack_size = 10_000,
+    memory_size = 10_000_000
 )]
 pub fn jpeg2000(data: MyArray, len: usize) -> bool {
     // Get a slice of MyArray of size len
