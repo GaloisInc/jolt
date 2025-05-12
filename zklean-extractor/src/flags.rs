@@ -1,4 +1,4 @@
-use crate::instruction::NamedInstruction;
+use crate::instruction::ZkLeanInstruction;
 use crate::modules::{Module, AsModule};
 use jolt_core::r1cs::inputs::JoltR1CSInputs;
 
@@ -7,12 +7,12 @@ use crate::{r1cs::input_to_field_name, util::indent};
 /// This represents a mapping between a [`JoltR1CSInputs`] variable and an instruction
 pub struct ZkLeanInstructionFlags<const WORD_SIZE: usize, const CHUNKS: usize, const REG_SIZE: usize> {
     r1cs_input: JoltR1CSInputs,
-    instruction: NamedInstruction<WORD_SIZE, CHUNKS, REG_SIZE>,
+    instruction: ZkLeanInstruction<WORD_SIZE, CHUNKS, REG_SIZE>,
 }
 
 impl ZkLeanInstructionFlags<32, 4, 16> {
     /// Extract the [`JoltR1CSInputs::InstructionFlags`] variable for a given instruction.
-    pub fn from_instruction(instruction: NamedInstruction<32, 4, 16>) -> Self {
+    pub fn from_instruction(instruction: ZkLeanInstruction<32, 4, 16>) -> Self {
         let opcode = instruction.to_instruction_set();
         Self {
             r1cs_input: JoltR1CSInputs::InstructionFlags(opcode),
@@ -26,8 +26,7 @@ impl ZkLeanInstructionFlags<32, 4, 16> {
     ) -> String {
         let r1cs_input = input_to_field_name(&self.r1cs_input);
         let instruction_name = self.instruction.name();
-        let composed_lookup_table = format!("{instruction_name}_32");
-        format!("({input_var}.{r1cs_input}, {composed_lookup_table})")
+        format!("({input_var}.{r1cs_input}, {instruction_name})")
     }
 }
 
@@ -40,8 +39,7 @@ impl ZkLeanLookupCases<32, 4, 16> {
     /// Iterate over the instruction set and extract each R1CS input variable.
     pub fn extract() -> Self {
         Self {
-            instruction_flags: NamedInstruction::<32, 4, 16>::variants()
-                .into_iter()
+            instruction_flags: ZkLeanInstruction::<32, 4, 16>::iter()
                 .map(ZkLeanInstructionFlags::from_instruction)
                 .collect(),
         }
