@@ -140,8 +140,10 @@ jobs:
       - name: Extract Jolt ZkLean
         run: cargo run --release -p zklean-extractor -- -o -p ./jolt-zklean
 
+      - uses: leanprover/lean-action@v1
+        with:
+          path: ./jolt-zklean/src
       - name: Run Lake build on the extracted model
         working-directory: ./jolt-zklean/src
-        uses: leanprover/lean-action@v1
         run: lake update && lake build
 
