@@ -124,17 +124,16 @@ jobs:
         run: cargo run --release
 
   test-extractor:
-    name: Test Jolt ZkLean extractor
+    name: ZkLean extractor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Extract Jolt ZkLean
+      - name: Extract Jolt ZkLean package
         run: cargo run --release -p zklean-extractor -- -o -p ./jolt-zklean
 
-      - name: Run Lake build on the extracted model
+      - name: Run lake build on the extracted model
         uses: leanprover/lean-action@v1
         with:
           lake-package-directory: ./jolt-zklean/src
-          use-github-cache: false
           build: true
 
