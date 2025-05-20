@@ -134,7 +134,7 @@ jobs:
       - name: Run Lake build on the extracted model
         uses: leanprover/lean-action@v1
         with:
-          build: true
-          auto-config: false
           lake-package-directory: ./jolt-zklean/src
+          build: true
+          build-args: --update
 
