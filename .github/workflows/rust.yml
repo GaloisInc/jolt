@@ -54,6 +54,13 @@ jobs:
         working-directory: ./jolt-core
         run: cargo build --release --target wasm32-unknown-unknown
 
+  build-lean:
+    name: Build Lean4
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -122,3 +129,14 @@ jobs:
       - name: Make sure the generated code runs
         working-directory: ./sample_project
         run: cargo run --release
+
+  test-extractor:
+    name: Test Jolt ZkLean extractor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract Jolt ZkLean
+        run: cargo run --release -p zklean-extractor -- -o -p /tmp/jolt-zklean
+
+      - name: Run Lake build on the extracted model
+        run: cd /tmp/jolt-zklean/src && lake build
