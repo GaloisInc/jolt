@@ -54,15 +54,6 @@ jobs:
         working-directory: ./jolt-core
         run: cargo build --release --target wasm32-unknown-unknown
 
-#  initialize-lake:
-#    name: Initialize lake
-#    runs-on: ubuntu-latest
-#    steps:
-#      - uses: actions/checkout@v4
-#      - uses: leanprover/lean-action@v1
-#      - name: Run lake update
-#        run: lake update
-
   test:
     runs-on: ubuntu-latest
     steps:
@@ -141,8 +132,7 @@ jobs:
         run: cargo run --release -p zklean-extractor -- -o -p ./jolt-zklean
 
       - uses: leanprover/lean-action@v1
-        with:
-          path: ./jolt-zklean/src
+        working-directory: ./jolt-zklean/src
       - name: Run Lake build on the extracted model
         working-directory: ./jolt-zklean/src
         run: lake update && lake build
