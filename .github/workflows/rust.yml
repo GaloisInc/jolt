@@ -135,6 +135,6 @@ jobs:
         uses: leanprover/lean-action@v1
         with:
           lake-package-directory: ./jolt-zklean/src
+          use-github-cache: false
           build: true
-          build-args: --update
 
