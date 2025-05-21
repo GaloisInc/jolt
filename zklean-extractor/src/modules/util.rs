@@ -58,9 +58,7 @@ impl From<serde_yaml::Error> for FSError {
 impl std::fmt::Display for FSError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FSError::TemplateError(s) => {
-                f.write_fmt(format_args!("Template directory error: {s}"))
-            }
+            FSError::TemplateError(s) => f.write_fmt(format_args!("Template directory error: {s}")),
             FSError::BadFilename(s) => {
                 f.write_fmt(format_args!("Bad file name in template directory: {s:?}"))
             }
