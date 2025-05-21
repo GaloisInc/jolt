@@ -233,7 +233,7 @@ impl<const NUM_NODES: usize> std::ops::Div for MleAst<NUM_NODES> {
 
 impl<const NUM_NODES: usize> FieldOps for MleAst<NUM_NODES> {}
 
-impl<'a, const NUM_NODES: usize> std::ops::Add<&'a Self> for MleAst<NUM_NODES> {
+impl<const NUM_NODES: usize> std::ops::Add<&Self> for MleAst<NUM_NODES> {
     type Output = Self;
 
     fn add(self, rhs: &Self) -> Self::Output {
@@ -241,7 +241,7 @@ impl<'a, const NUM_NODES: usize> std::ops::Add<&'a Self> for MleAst<NUM_NODES> {
     }
 }
 
-impl<'a, const NUM_NODES: usize> std::ops::Sub<&'a Self> for MleAst<NUM_NODES> {
+impl<const NUM_NODES: usize> std::ops::Sub<&Self> for MleAst<NUM_NODES> {
     type Output = Self;
 
     fn sub(self, rhs: &Self) -> Self::Output {
@@ -249,7 +249,7 @@ impl<'a, const NUM_NODES: usize> std::ops::Sub<&'a Self> for MleAst<NUM_NODES> {
     }
 }
 
-impl<'a, const NUM_NODES: usize> std::ops::Mul<&'a Self> for MleAst<NUM_NODES> {
+impl<const NUM_NODES: usize> std::ops::Mul<&Self> for MleAst<NUM_NODES> {
     type Output = Self;
 
     fn mul(self, rhs: &Self) -> Self::Output {
@@ -257,7 +257,7 @@ impl<'a, const NUM_NODES: usize> std::ops::Mul<&'a Self> for MleAst<NUM_NODES> {
     }
 }
 
-impl<'a, const NUM_NODES: usize> std::ops::Div<&'a Self> for MleAst<NUM_NODES> {
+impl<const NUM_NODES: usize> std::ops::Div<&Self> for MleAst<NUM_NODES> {
     type Output = Self;
 
     fn div(self, rhs: &Self) -> Self::Output {
@@ -265,7 +265,7 @@ impl<'a, const NUM_NODES: usize> std::ops::Div<&'a Self> for MleAst<NUM_NODES> {
     }
 }
 
-impl<'a, const NUM_NODES: usize> FieldOps<&'a Self, Self> for MleAst<NUM_NODES> {}
+impl<const NUM_NODES: usize> FieldOps<&Self, Self> for MleAst<NUM_NODES> {}
 
 impl<const NUM_NODES: usize> std::ops::AddAssign for MleAst<NUM_NODES> {
     fn add_assign(&mut self, rhs: Self) {
@@ -413,7 +413,7 @@ impl<const NUM_NODES: usize> JoltField for MleAst<NUM_NODES> {
     }
 
     fn from_i128(val: i128) -> Self {
-        Self::new_with_root(MleAstNode::Scalar(val as i128))
+        Self::new_with_root(MleAstNode::Scalar(val))
     }
 
     fn square(&self) -> Self {

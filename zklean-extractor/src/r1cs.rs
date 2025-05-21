@@ -67,7 +67,7 @@ where
             let field = input_to_field_name(input);
             f.write_fmt(format_args!("{}{field} : ZKExpr f\n", indent(indent_level),))?;
         }
-        f.write(b"\n")?;
+        f.write_all(b"\n")?;
 
         // for every input make it Witnessable following the pattern
         // ```
@@ -99,7 +99,7 @@ where
                 indent(indent_level),
             ))?;
         }
-        f.write(b"\n")?;
+        f.write_all(b"\n")?;
         f.write_fmt(format_args!("{}pure {{\n", indent(indent_level),))?;
         indent_level += 1;
         for input in &self.inputs {
@@ -108,7 +108,7 @@ where
         }
         indent_level -= 1;
         f.write_fmt(format_args!("{}}}\n", indent(indent_level),))?;
-        f.write(b"\n")?;
+        f.write_all(b"\n")?;
 
         indent_level = top_level_indent;
         f.write_fmt(format_args!(
@@ -137,7 +137,7 @@ where
             indent_level -= 1;
         }
 
-        f.write(b"\n")?;
+        f.write_all(b"\n")?;
         indent_level = top_level_indent;
         f.write_fmt(format_args!(
                 "{}def non_uniform_jolt_constraints [ZKField f] (jolt_inputs : JoltR1CSInputs f) (jolt_offset_inputs : JoltR1CSInputs f) : ZKBuilder f PUnit := do\n",
@@ -200,11 +200,11 @@ pub fn input_to_field_name(input: &JoltR1CSInputs) -> String {
     let mut string: String = format!("{:?}", input);
 
     string = comma
-        .replace_all(&string.as_str(), NoExpand("_"))
+        .replace_all(string.as_str(), NoExpand("_"))
         .to_string();
 
-    while paren.is_match(&string.as_str()) {
-        string = paren.replace(&string.as_str(), "_$1").to_string();
+    while paren.is_match(string.as_str()) {
+        string = paren.replace(string.as_str(), "_$1").to_string();
     }
 
     string
@@ -235,7 +235,7 @@ fn pretty_print_term<const C: usize>(
 fn pretty_print_lc<const C: usize>(inputs_struct: &str, lc: &LC) -> String {
     let terms = lc
         .terms()
-        .into_iter()
+        .iter()
         .filter_map(|term| pretty_print_term::<C>(inputs_struct, term))
         .collect::<Vec<_>>();
     match terms.len() {
