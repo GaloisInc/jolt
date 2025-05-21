@@ -1,7 +1,7 @@
 ZKLean Extractor
 ----------------
 
-This program extracts a representation of the MLEs and constraints for each `JoltInstruction` and `LassoSubtable` suitable for the ZkLean library.
+This program extracts a Lean4 representation of the Jolt frontend suitable for the ZkLean library. The R1CS constraints and instruction lookups are all taken automatically from the Jolt codebase, so any changes will be reflected in the Lean code.
 
 Running
 =======
