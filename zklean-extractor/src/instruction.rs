@@ -154,7 +154,7 @@ mod test {
     use strum::EnumCount as _;
 
     type RefField = ark_bn254::Fr;
-    type TestField = crate::mle_ast::MleAst<4096>;
+    type TestField = crate::mle_ast::MleAst<2048>;
     type ParamSet = crate::constants::RV32IParameterSet;
 
     #[derive(Clone)]
