@@ -158,7 +158,7 @@ where
         ))?;
         indent_level += 1;
         for OffsetEqConstraint { cond, a, b } in &self.non_uniform_constraints {
-            // NOTE: See comments on `materialize_offset_eq` and `OffsetLC`. An offset contraint is three
+            // NOTE: See comments on `materialize_offset_eq` and `OffsetLC`. An offset constraint is three
             // `OffsetLC`s, cond, a, and b. An `OffsetLC` is an `LC` and a `bool`. If the bool is true,
             // then the variables in the LC come from the *next* step. The cond, a, and b `LC`s resolve to
             // a constraint as
