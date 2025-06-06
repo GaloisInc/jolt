@@ -466,28 +466,9 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
             // would without the Dao-Thaler optimization, using the standard linear-time
             // sumcheck algorithm with optimizations for sparsity.
 
-            let eq_evals: Vec<(F, F)> = eq_poly
-                .E_out_current()
-                .par_chunks(2)
-                .take(self.dense_len / 4)
-                .map(|eq_chunk| {
-                    let eval_point_at_0 = eq_chunk[0];
-                    let eval_point_at_infty = eq_chunk[1] - eq_chunk[0];
-                    (eval_point_at_0, eval_point_at_infty)
-                })
-                .collect();
             // This is what \sum_{x} eq(r, x) * left(x) * right(x) would be if
             // `left` and `right` were both all ones.
-            let eq_eval_sums: (F, F) = eq_evals
-                .par_iter()
-                .fold(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                )
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                );
+            let E_out_eval_sum: F = eq_poly.E_out_current().into_iter().sum();
             // Now we compute the deltas, correcting `eq_eval_sums` for the
             // elements of `left` and `right` that aren't ones.
             let deltas: (F, F) = self
@@ -509,12 +490,10 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                             let left_eval_at_infty = left.1 - left.0;
                             let right_eval_at_infty = right.1 - right.0;
 
-                            let eq_evals = eq_evals[block_index];
+                            let E_out_eval = eq_poly.E_out_current()[block_index];
                             (
-                                eq_evals
-                                    .0
-                                    .mul_0_optimized(left.0.mul_1_optimized(right.0) - F::one()),
-                                eq_evals.1 * (left_eval_at_infty * right_eval_at_infty - F::one()),
+                                E_out_eval.mul_0_optimized(left.0.mul_1_optimized(right.0) - F::one()),
+                                E_out_eval * (left_eval_at_infty * right_eval_at_infty - F::one()),
                             )
                         })
                 })
@@ -524,37 +503,18 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                 );
 
             (
-                eq_eval_sums.0 + deltas.0,
-                eq_eval_sums.1 + deltas.1,
+                E_out_eval_sum + deltas.0,
+                E_out_eval_sum + deltas.1,
             )
         } else {
             // This is a more complicated version of the `else` case in
             // `DenseInterleavedPolynomial::compute_cubic`. Read that one first.
 
-            // We start by computing the E1 evals:
-            // (1 - j) * E1[0, x1] + j * E1[1, x1]
-            let E_in_evals: Vec<_> = eq_poly.E_in_current()
-                .par_chunks(2)
-                .map(|E_in_chunk| {
-                    let eval_point_at_0 = E_in_chunk[0];
-                    let eval_point_at_infty = E_in_chunk[1] - E_in_chunk[0];
-                    (eval_point_at_0, eval_point_at_infty)
-                })
-                .collect();
             // Now compute \sum_{x1} ((1 - j) * E1[0, x1] + j * E1[1, x1])
-            let E_in_eval_sums: (F, F) = E_in_evals
-                .par_iter()
-                .fold(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                )
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                );
+            let E_in_eval_sum: F = eq_poly.E_in_current().into_iter().sum();
 
-            let num_x1_bits = eq_poly.E_in_current_len().log_2() - 1;
-            let x1_bitmask = (1 << num_x1_bits) - 1;
+            let num_x_in_bits = eq_poly.E_in_current_len().log_2() - 1;
+            let x_in_bitmask = (1 << num_x_in_bits) - 1;
 
             // Iterate over the non-one coefficients and compute the deltas (relative to
             // what the cubic would be if all the coefficients were ones).
@@ -565,9 +525,9 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     segment
                         .par_chunk_by(|a, b| {
                             // Group by x2
-                            let a_x2 = (a.index / 4) >> num_x1_bits;
-                            let b_x2 = (b.index / 4) >> num_x1_bits;
-                            a_x2 == b_x2
+                            let a_x_out = (a.index / 4) >> num_x_in_bits;
+                            let b_x_out = (b.index / 4) >> num_x_in_bits;
+                            a_x_out == b_x_out
                         })
                         .map(|chunk| {
                             let mut inner_sum = (F::zero(), F::zero());
@@ -584,21 +544,23 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                                 let left_eval_at_infty = left.1 - left.0;
                                 let right_eval_at_infty = right.1 - right.0;
 
-                                let x1 = block_index & x1_bitmask;
+                                let x_in = block_index & x_in_bitmask;
                                 let delta = (
-                                    E_in_evals[x1].0.mul_0_optimized(
+                                    eq_poly.E_in_current()[x_in].mul_0_optimized(
                                         left.0.mul_1_optimized(right.0) - F::one(),
                                     ),
-                                    E_in_evals[x1].1 * (left_eval_at_infty * right_eval_at_infty - F::one()),
+                                    eq_poly.E_in_current()[x_in] * (
+                                        left_eval_at_infty * right_eval_at_infty - F::one()
+                                    ),
                                 );
                                 inner_sum.0 += delta.0;
                                 inner_sum.1 += delta.1;
                             }
 
-                            let x2 = (chunk[0].index / 4) >> num_x1_bits;
+                            let x_out = (chunk[0].index / 4) >> num_x_in_bits;
                             (
-                                eq_poly.E_out_current()[x2] * inner_sum.0,
-                                eq_poly.E_out_current()[x2] * inner_sum.1,
+                                eq_poly.E_out_current()[x_out] * inner_sum.0,
+                                eq_poly.E_out_current()[x_out] * inner_sum.1,
                             )
                         })
                 })
@@ -613,7 +575,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
             // As a refresher, the cubic evals we're computing are:
             //
             // \sum_{x2} E2[x2] * (\sum_{x1} ((1 - j) * E1[0, x1] + j * E1[1, x1]) * \prod_k ((1 - j) * P_k(0 || x1 || x2) + j * P_k(1 || x1 || x2)))
-            let evals_assuming_all_ones = if self.dense_len.is_power_of_two() {
+            let eval_assuming_all_ones = if self.dense_len.is_power_of_two() {
                 // If `dense_len` is a power of 2, there is no 0-padding.
                 //
                 // So we have:
@@ -621,7 +583,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                 //   = \sum_{x2} (E2[x2] * \sum_{x1} E1_evals[x1])
                 //   = (\sum_{x2} E2[x2]) * (\sum_{x1} E1_evals[x1])
                 //   = 1 * E1_eval_sums
-                E_in_eval_sums
+                E_in_eval_sum
             } else {
                 let chunk_size = self.dense_len.next_power_of_two() / eq_poly.E_out_current_len();
                 let num_all_one_chunks = self.dense_len / chunk_size;
@@ -635,10 +597,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     // This makes the entire inner sum 0 for those values of x2.
                     // So we can simply sum over E2 for the _other_ values of x2, and
                     // multiply by `E1_eval_sums`.
-                    (
-                        E_out_sum * E_in_eval_sums.0,
-                        E_out_sum * E_in_eval_sums.1,
-                    )
+                    E_out_sum * E_in_eval_sum
                 } else {
                     // If `dense_len` isn't a power of 2 and doesn't divide `chunk_size`,
                     // the last nonzero "chunk" will have (self.dense_len % chunk_size) ones,
@@ -646,28 +605,15 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     // e.g. 1 1 1 1 1 1 1 1 0 0 0 0
                     //
                     // This handles this last chunk:
-                    let last_chunk_evals = E_in_evals[..(self.dense_len % chunk_size) / 4]
-                        .par_iter()
-                        .fold(
-                            || (F::zero(), F::zero()),
-                            |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                        )
-                        .reduce(
-                            || (F::zero(), F::zero()),
-                            |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                        );
-                    (
-                        E_out_sum * E_in_eval_sums.0
-                            + eq_poly.E_out_current()[num_all_one_chunks] * last_chunk_evals.0,
-                        E_out_sum * E_in_eval_sums.1
-                            + eq_poly.E_out_current()[num_all_one_chunks] * last_chunk_evals.1,
-                    )
+                    let last_chunk_eval: F = eq_poly.E_in_current()[..(self.dense_len % chunk_size) / 4].into_iter().sum();
+                    E_out_sum * E_in_eval_sum
+                        + eq_poly.E_out_current()[num_all_one_chunks] * last_chunk_eval
                 }
             };
 
             (
-                evals_assuming_all_ones.0 + deltas.0,
-                evals_assuming_all_ones.1 + deltas.1,
+                eval_assuming_all_ones + deltas.0,
+                eval_assuming_all_ones + deltas.1,
             )
         };
 

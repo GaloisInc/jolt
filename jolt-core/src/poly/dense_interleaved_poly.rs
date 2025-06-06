@@ -217,13 +217,8 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
             // would without the Dao-Thaler optimization, using the standard linear-time
             // sumcheck algorithm.
             self.par_chunks(4)
-                .zip(eq_poly.E_out_current().par_chunks(2))
-                .map(|(layer_chunk, eq_chunk)| {
-                    let eq_evals = {
-                        let eval_point_at_0 = eq_chunk[0];
-                        let eval_point_at_infty = eq_chunk[1] - eq_chunk[0];
-                        (eval_point_at_0, eval_point_at_infty)
-                    };
+                .zip(eq_poly.E_out_current())
+                .map(|(layer_chunk, E_out_eval)| {
                     let left = (
                         *layer_chunk.first().unwrap_or(&F::zero()),
                         *layer_chunk.get(2).unwrap_or(&F::zero()),
@@ -237,8 +232,8 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     let right_eval_at_infty = right.1 - right.0;
 
                     (
-                        eq_evals.0 * left.0 * right.0,
-                        eq_evals.1 * left_eval_at_infty * right_eval_at_infty,
+                        *E_out_eval * left.0 * right.0,
+                        *E_out_eval * left_eval_at_infty * right_eval_at_infty,
                     )
                 })
                 .reduce(

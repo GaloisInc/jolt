@@ -407,21 +407,14 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                 coalesced_flags
                     .par_chunks(2)
                     .zip(coalesced_fingerprints.par_chunks(2))
-                    .zip(eq_poly.E_out_current().par_chunks(2))
-                    .map(|((flags, fingerprints), eq_chunk)| {
-                        let eq_evals = {
-                            let eval_point_at_0 = eq_chunk[0];
-                            let eval_point_at_infty = eq_chunk[1] - eq_chunk[0];
-                            (eval_point_at_0, eval_point_at_infty)
-                        };
+                    .zip(eq_poly.E_out_current())
+                    .map(|((flags, fingerprints), E_out_eval)| {
                         let flag_eval_at_infty = flags[1] - flags[0];
                         let fingerprint_eval_at_infty = fingerprints[1] - fingerprints[0];
 
                         (
-                            eq_evals.0 * (flags[0] * fingerprints[0] + F::one() - flags[0]),
-                            eq_evals.1
-                                * (flag_eval_at_infty * fingerprint_eval_at_infty
-                                    + F::one() - flag_eval_at_infty),
+                            *E_out_eval * (flags[0] * fingerprints[0] + F::one() - flags[0]),
+                            *E_out_eval * (flag_eval_at_infty * fingerprint_eval_at_infty + F::one() - flag_eval_at_infty),
                         )
                     })
                     .reduce(
@@ -431,15 +424,6 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
             } else {
                 // 2. Flags/fingerprints are coalesced, and E1 isn't fully bound
                 // This is similar to the else case of `DenseInterleavedPolynomial::compute_cubic`
-                let E_in_evals: Vec<_> = eq_poly.E_in_current()
-                    .par_chunks(2)
-                    .map(|E_in_chunk| {
-                        let eval_point_at_0 = E_in_chunk[0];
-                        let eval_point_at_infty = E_in_chunk[1] - E_in_chunk[0];
-                        (eval_point_at_0, eval_point_at_infty)
-                    })
-                    .collect();
-
                 let flag_chunk_size = coalesced_flags.len().next_power_of_two() / eq_poly.E_out_current_len();
                 let fingerprint_chunk_size =
                     coalesced_fingerprints.len().next_power_of_two() / eq_poly.E_out_current_len();
@@ -448,19 +432,19 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     .par_iter()
                     .zip(coalesced_flags.par_chunks(flag_chunk_size))
                     .zip(coalesced_fingerprints.par_chunks(fingerprint_chunk_size))
-                    .map(|((E_out_eval, flag_x2), fingerprint_x2)| {
+                    .map(|((E_out_eval, flag_x_out), fingerprint_x_out)| {
                         let mut inner_sum = (F::zero(), F::zero(), F::zero());
-                        for ((E_in_evals, flag_chunk), fingerprint_chunk) in E_in_evals
+                        for ((E_in_eval, flag_chunk), fingerprint_chunk) in eq_poly.E_in_current()
                             .iter()
-                            .zip(flag_x2.chunks(2))
-                            .zip(fingerprint_x2.chunks(2))
+                            .zip(flag_x_out.chunks(2))
+                            .zip(fingerprint_x_out.chunks(2))
                         {
                             let flag_eval_at_infty = flag_chunk[1] - flag_chunk[0];
                             let fingerprint_eval_at_infty = fingerprint_chunk[1] - fingerprint_chunk[0];
 
-                            inner_sum.0 += E_in_evals.0
+                            inner_sum.0 += *E_in_eval
                                 * (flag_chunk[0] * fingerprint_chunk[0] + F::one() - flag_chunk[0]);
-                            inner_sum.1 += E_in_evals.1
+                            inner_sum.1 += *E_in_eval
                                 * (flag_eval_at_infty * fingerprint_eval_at_infty
                                     + F::one() - flag_eval_at_infty);
                         }
@@ -493,25 +477,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
         let quadratic_evals = if eq_poly.E_in_current_len() == 1 {
             // 3. Flags/fingerprints aren't coalesced, and E1 is fully bound
             // This is similar to the if case of `SparseInterleavedPolynomial::compute_cubic`
-            let eq_evals: Vec<(F, F)> = eq_poly.E_out_current()
-                .par_chunks(2)
-                .take(self.batched_layer_len / 4)
-                .map(|eq_chunk| {
-                    let eval_point_at_0 = eq_chunk[0];
-                    let eval_point_at_infty = eq_chunk[1] - eq_chunk[0];
-                    (eval_point_at_0, eval_point_at_infty)
-                })
-                .collect();
-            let eq_eval_sums: (F, F) = eq_evals
-                .par_iter()
-                .fold(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                )
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                );
+            let E_out_eval_sum: F = eq_poly.E_out_current().into_iter().sum();
 
             let deltas: (F, F) = (0..self.fingerprints.len())
                 .into_par_iter()
@@ -577,12 +543,11 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                         let fingerprint_eval_at_infty = fingerprints.1 - fingerprints.0;
 
                         let block_index = (self.layer_len * batch_index) / 4 + index / 2;
-                        let eq_evals = eq_evals[block_index];
+                        let E_out_eval = eq_poly.E_out_current()[block_index];
 
-                        delta.0 += eq_evals
-                            .0
+                        delta.0 += E_out_eval
                             .mul_0_optimized(flags.0.mul_01_optimized(fingerprints.0) - flags.0);
-                        delta.1 += eq_evals.1.mul_0_optimized(
+                        delta.1 += E_out_eval.mul_0_optimized(
                             flag_eval_at_infty.mul_01_optimized(fingerprint_eval_at_infty) - flag_eval_at_infty,
                         );
                     }
@@ -596,33 +561,16 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
             // eq_eval_sum + ∆ = Σ eq_evals[i] + Σ eq_evals[i] * (flag[i] * fingerprint[i] - flag[i]))
             //                 = Σ eq_evals[j] * (flag[i] * fingerprint[i] + 1 - flag[i])
             (
-                eq_eval_sums.0 + deltas.0,
-                eq_eval_sums.1 + deltas.1,
+                E_out_eval_sum + deltas.0,
+                E_out_eval_sum + deltas.1,
             )
         } else {
             // 4. Flags/fingerprints aren't coalesced, and E1 isn't fully bound
             // This is similar to the else case of `SparseInterleavedPolynomial::compute_cubic`
-            let E_in_evals: Vec<_> = eq_poly.E_in_current()
-                .par_chunks(2)
-                .map(|E_in_chunk| {
-                    let eval_point_at_0 = E_in_chunk[0];
-                    let eval_point_at_infty = E_in_chunk[1] - E_in_chunk[0];
-                    (eval_point_at_0, eval_point_at_infty)
-                })
-                .collect();
-            let E_in_eval_sums: (F, F) = E_in_evals
-                .par_iter()
-                .fold(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                )
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                );
+            let E_in_eval_sum: F = eq_poly.E_in_current().into_iter().sum();
 
-            let num_x1_bits = eq_poly.E_in_current_len().log_2() - 1;
-            let x1_bitmask = (1 << num_x1_bits) - 1;
+            let num_x_in_bits = eq_poly.E_in_current_len().log_2() - 1;
+            let x_in_bitmask = (1 << num_x_in_bits) - 1;
 
             let deltas = (0..self.fingerprints.len())
                 .into_par_iter()
@@ -637,7 +585,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     let unbound = self.flag_values.is_empty();
                     let mut delta = (F::zero(), F::zero());
                     let mut inner_sum = (F::zero(), F::zero());
-                    let mut prev_x2 = 0;
+                    let mut prev_x_out = 0;
 
                     let mut next_index_to_process = 0usize;
                     for (j, index) in flag_indices.iter().enumerate() {
@@ -690,25 +638,24 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                         let fingerprint_eval_at_infty = fingerprints.1 - fingerprints.0;
 
                         let block_index = (self.layer_len * batch_index) / 4 + index / 2;
-                        let x2 = block_index >> num_x1_bits;
-                        if x2 != prev_x2 {
-                            delta.0 += eq_poly.E_out_current()[prev_x2] * inner_sum.0;
-                            delta.1 += eq_poly.E_out_current()[prev_x2] * inner_sum.1;
+                        let x_out = block_index >> num_x_in_bits;
+                        if x_out != prev_x_out {
+                            delta.0 += eq_poly.E_out_current()[prev_x_out] * inner_sum.0;
+                            delta.1 += eq_poly.E_out_current()[prev_x_out] * inner_sum.1;
                             inner_sum = (F::zero(), F::zero());
-                            prev_x2 = x2;
+                            prev_x_out = x_out;
                         }
 
-                        let x1 = block_index & x1_bitmask;
-                        inner_sum.0 += E_in_evals[x1]
-                            .0
+                        let x_in = block_index & x_in_bitmask;
+                        inner_sum.0 += eq_poly.E_in_current()[x_in]
                             .mul_0_optimized(flags.0.mul_01_optimized(fingerprints.0) - flags.0);
-                        inner_sum.1 += E_in_evals[x1].1.mul_0_optimized(
+                        inner_sum.1 += eq_poly.E_in_current()[x_in].mul_0_optimized(
                             flag_eval_at_infty.mul_01_optimized(fingerprint_eval_at_infty) - flag_eval_at_infty,
                         );
                     }
 
-                    delta.0 += eq_poly.E_out_current()[prev_x2] * inner_sum.0;
-                    delta.1 += eq_poly.E_out_current()[prev_x2] * inner_sum.1;
+                    delta.0 += eq_poly.E_out_current()[prev_x_out] * inner_sum.0;
+                    delta.1 += eq_poly.E_out_current()[prev_x_out] * inner_sum.1;
 
                     delta
                 })
@@ -725,7 +672,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
             // As a refresher, the cubic evals we're computing are:
             //
             // \sum_x2 E2[x2] * (\sum_x1 ((1 - j) * E1[0, x1] + j * E1[1, x1]) * \prod_k ((1 - j) * P_k(0 || x1 || x2) + j * P_k(1 || x1 || x2)))
-            let evals_assuming_all_ones = if self.batched_layer_len.is_power_of_two() {
+            let eval_assuming_all_ones = if self.batched_layer_len.is_power_of_two() {
                 // If `batched_layer_len` is a power of 2, there is no 0-padding.
                 //
                 // So we have:
@@ -733,7 +680,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                 //   = \sum_x2 (E2[x2] * \sum_x1 E1_evals[x1])
                 //   = (\sum_x2 E2[x2]) * (\sum_x1 E1_evals[x1])
                 //   = 1 * E1_eval_sums
-                E_in_eval_sums
+                E_in_eval_sum
             } else {
                 let chunk_size = self.batched_layer_len.next_power_of_two() / eq_poly.E_out_current_len();
                 let num_all_one_chunks = self.batched_layer_len / chunk_size;
@@ -747,10 +694,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     // This makes the entire inner sum 0 for those values of x2.
                     // So we can simply sum over E2 for the _other_ values of x2, and
                     // multiply by `E1_eval_sums`.
-                    (
-                        E_out_sum * E_in_eval_sums.0,
-                        E_out_sum * E_in_eval_sums.1,
-                    )
+                    E_out_sum * E_in_eval_sum
                 } else {
                     // If `batched_layer_len` isn't a power of 2 and doesn't divide `chunk_size`,
                     // the last nonzero "chunk" will have (self.dense_len % chunk_size) ones,
@@ -758,28 +702,14 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     // e.g. 1 1 1 1 1 1 1 1 0 0 0 0
                     //
                     // This handles this last chunk:
-                    let last_chunk_evals = E_in_evals[..(self.batched_layer_len % chunk_size) / 4]
-                        .par_iter()
-                        .fold(
-                            || (F::zero(), F::zero()),
-                            |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                        )
-                        .reduce(
-                            || (F::zero(), F::zero()),
-                            |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                        );
-                    (
-                        E_out_sum * E_in_eval_sums.0
-                            + eq_poly.E_out_current()[num_all_one_chunks] * last_chunk_evals.0,
-                        E_out_sum * E_in_eval_sums.1
-                            + eq_poly.E_out_current()[num_all_one_chunks] * last_chunk_evals.1,
-                    )
+                    let last_chunk_evals: F = eq_poly.E_in_current()[..(self.batched_layer_len % chunk_size) / 4].into_iter().sum();
+                    E_out_sum * E_in_eval_sum + eq_poly.E_out_current()[num_all_one_chunks] * last_chunk_evals
                 }
             };
 
             (
-                evals_assuming_all_ones.0 + deltas.0,
-                evals_assuming_all_ones.1 + deltas.1,
+                eval_assuming_all_ones + deltas.0,
+                eval_assuming_all_ones + deltas.1,
             )
         };
 
