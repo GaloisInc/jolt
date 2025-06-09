@@ -293,7 +293,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
         #[cfg(test)]
         {
             let n = eq_poly.w.len();
-            let i = n - eq_poly.current_index;
+            let i = n - eq_poly.current_index - 1;
             let eq_evals = crate::poly::eq_poly::EqPolynomial::evals(&eq_poly.w[i..]);
             let mut naive_quadratic_evals = (F::zero(), F::zero());
             for (i, eq) in eq_evals.into_iter().enumerate() {
