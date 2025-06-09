@@ -212,7 +212,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
     fn compute_cubic(&self, eq_poly: &GruenSplitEqPolynomial<F>, previous_round_claim: F) -> UniPoly<F> {
         // We use the Dao-Thaler optimization for the EQ polynomial, so there are two cases we
         // must handle. For details, refer to Section 2.2 of https://eprint.iacr.org/2024/1210.pdf
-        let quadratic_evals = if eq_poly.E_in_current_len() == 1 {
+        let quadratic_evals = if eq_poly.E_in_vec.is_empty() { // E_in fully bound
             assert_eq!(eq_poly.E_out_current_len() * 4, self.coeffs.len());
             // If `eq_poly.E1` has been fully bound, we compute the cubic polynomial as we
             // would without the Dao-Thaler optimization, using the standard linear-time
