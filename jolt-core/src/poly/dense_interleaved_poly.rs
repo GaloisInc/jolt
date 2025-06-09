@@ -212,8 +212,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
     fn compute_cubic(&self, eq_poly: &GruenSplitEqPolynomial<F>, previous_round_claim: F) -> UniPoly<F> {
         // We use the Dao-Thaler optimization for the EQ polynomial, so there are two cases we
         // must handle. For details, refer to Section 2.2 of https://eprint.iacr.org/2024/1210.pdf
-        let quadratic_evals = if eq_poly.E_in_vec.is_empty() { // E_in fully bound
-            assert_eq!(eq_poly.E_out_current_len() * 4, self.coeffs.len());
+        let quadratic_evals = if eq_poly.E_in_current_len() == 1 {
             // If `eq_poly.E1` has been fully bound, we compute the cubic polynomial as we
             // would without the Dao-Thaler optimization, using the standard linear-time
             // sumcheck algorithm.
@@ -290,6 +289,21 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
                 )
         };
+
+        #[cfg(test)]
+        {
+            let n = eq_poly.w.len();
+            let i = n - eq_poly.current_index;
+            let eq_evals = crate::poly::eq_poly::EqPolynomial::evals(&eq_poly.w[i..]);
+            let mut naive_quadratic_evals = (F::zero(), F::zero());
+            for (i, eq) in eq_evals.into_iter().enumerate() {
+                let left = (self.coeffs[4 * i], self.coeffs[4 * i + 2]);
+                let right = (self.coeffs[4 * i + 1], self.coeffs[4 * i + 3]);
+                naive_quadratic_evals.0 += eq * left.0 * right.0;
+                naive_quadratic_evals.0 += eq * (left.1 - left.0) * (right.1 - right.0);
+            }
+            assert_eq!(quadratic_evals, naive_quadratic_evals);
+        }
 
         let scalar_times_w_i = eq_poly.current_scalar * eq_poly.w[eq_poly.current_index - 1];
 
