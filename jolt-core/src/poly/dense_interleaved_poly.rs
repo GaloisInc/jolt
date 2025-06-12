@@ -290,22 +290,28 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                 )
         };
 
-        #[cfg(test)]
-        {
-            let eq_evals = crate::poly::eq_poly::EqPolynomial::evals(&eq_poly.w[..eq_poly.current_index - 1]);
-            let mut naive_quadratic_evals = (F::zero(), F::zero());
-            for (i, eq) in eq_evals.into_iter().enumerate() {
-                let left = (self.coeffs[4 * i], self.coeffs[4 * i + 2]);
-                let right = (self.coeffs[4 * i + 1], self.coeffs[4 * i + 3]);
-                naive_quadratic_evals.0 += eq * left.0 * right.0;
-                naive_quadratic_evals.0 += eq * (left.1 - left.0) * (right.1 - right.0);
-            }
-            assert_eq!(quadratic_evals, naive_quadratic_evals);
-        }
+        //#[cfg(test)]
+        //{
+        //    let eq_evals = crate::poly::eq_poly::EqPolynomial::evals(&eq_poly.w[..eq_poly.current_index - 1]);
+        //    let mut naive_quadratic_evals = (F::zero(), F::zero());
+        //    for (i, eq) in eq_evals.into_iter().enumerate() {
+        //        let left = (
+        //            *self.coeffs.get(4 * i + 0).unwrap_or(&F::zero()),
+        //            *self.coeffs.get(4 * i + 2).unwrap_or(&F::zero()),
+        //        );
+        //        let right = (
+        //            *self.coeffs.get(4 * i + 1).unwrap_or(&F::zero()),
+        //            *self.coeffs.get(4 * i + 3).unwrap_or(&F::zero()),
+        //        );
+        //        naive_quadratic_evals.0 += eq * left.0 * right.0;
+        //        naive_quadratic_evals.1 += eq * (left.1 - left.0) * (right.1 - right.0);
+        //    }
+        //    assert_eq!(quadratic_evals, naive_quadratic_evals);
+        //}
 
         let scalar_times_w_i = eq_poly.current_scalar * eq_poly.w[eq_poly.current_index - 1];
 
-        UniPoly::from_linear_times_quadratic_with_hint(
+        let cubic = UniPoly::from_linear_times_quadratic_with_hint(
             // The coefficients of `eq(w[(n - i)..], r[..i]) * eq(w[n - i - 1], X)`
             [
                 eq_poly.current_scalar - scalar_times_w_i,
@@ -314,7 +320,61 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
             quadratic_evals.0,
             quadratic_evals.1,
             previous_round_claim,
-        )
+        );
+
+        #[cfg(test)]
+        {
+            let eq_merged = eq_poly.merge();
+            let naive_cubic_evals = self.coeffs
+                .par_chunks(4)
+                .zip(eq_merged.evals().par_chunks(2))
+                .map(|(self_chunk, eq_chunk)| {
+                    let eq_evals = {
+                        let eval_point_0 = eq_chunk[0];
+                        let m_eq = eq_chunk[1] - eq_chunk[0];
+                        let eval_point_2 = eq_chunk[1] + m_eq;
+                        let eval_point_3 = eval_point_2 + m_eq;
+                        (eval_point_0, eval_point_2, eval_point_3)
+                    };
+                    let left = (
+                        *self_chunk.get(0).unwrap_or(&F::zero()),
+                        *self_chunk.get(2).unwrap_or(&F::zero()),
+                    );
+                    let right = (
+                        *self_chunk.get(1).unwrap_or(&F::zero()),
+                        *self_chunk.get(3).unwrap_or(&F::zero()),
+                    );
+
+                    let m_flag = left.1 - left.0;
+                    let m_fingerprint = right.1 - right.0;
+
+                    let flag_eval_2 = left.1 + m_flag;
+                    let flag_eval_3 = flag_eval_2 + m_flag;
+
+                    let fingerprint_eval_2 = right.1 + m_fingerprint;
+                    let fingerprint_eval_3 = fingerprint_eval_2 + m_fingerprint;
+
+                    (
+                        eq_evals.0 * (left.0 * right.0 + F::one() - left.0),
+                        eq_evals.1 * (flag_eval_2 * fingerprint_eval_2 + F::one() - flag_eval_2),
+                        eq_evals.2 * (flag_eval_3 * fingerprint_eval_3 + F::one() - flag_eval_3),
+                    )
+                })
+                .reduce(
+                    || (F::zero(), F::zero(), F::zero()),
+                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1, sum.2 + evals.2),
+                );
+            let naive_cubic_evals = [
+                naive_cubic_evals.0,
+                previous_round_claim - naive_cubic_evals.0,
+                naive_cubic_evals.1,
+                naive_cubic_evals.2,
+            ];
+            let dense_cubic = UniPoly::from_evals(&naive_cubic_evals);
+            assert_eq!(dense_cubic, cubic);
+        }
+
+        cubic
     }
 
     fn final_claims(&self) -> (F, F) {
