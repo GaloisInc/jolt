@@ -317,7 +317,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                     || (F::zero(), F::zero()),
                     |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
                 );
-            assert_eq!(quadratic_evals, naive_quadratic_evals)
+            assert_eq!(quadratic_evals, naive_quadratic_evals, "Failed at round {}", eq_poly.w.len() - eq_poly.current_index)
         }
 
         let scalar_times_w_i = eq_poly.current_scalar * eq_poly.w[eq_poly.current_index - 1];
@@ -382,7 +382,7 @@ impl<F: JoltField, ProofTranscript: Transcript> BatchedCubicSumcheck<F, ProofTra
                 naive_cubic_evals.2,
             ];
             let naive_cubic = UniPoly::from_evals(&naive_cubic_evals);
-            assert_eq!(naive_cubic, cubic);
+            assert_eq!(naive_cubic, cubic, "Failed at round {}", eq_poly.w.len() - eq_poly.current_index);
         }
 
         cubic
