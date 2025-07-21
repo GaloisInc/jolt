@@ -8,7 +8,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use std::sync::Once;
-use syn::{parse_macro_input, AttributeArgs, Ident, ItemFn, PatType, ReturnType, Type};
+use syn::{parse_macro_input, punctuated::Punctuated, token::Paren, AttributeArgs, Ident, ItemFn, PatType, ReturnType, Type, TypeTuple};
 
 static WASM_IMPORTS_INIT: Once = Once::new();
 
@@ -408,22 +408,39 @@ impl MacroBuilder {
         });
         let input_start = memory_layout.input_start;
         let output_start = memory_layout.output_start;
-        let max_input_len = attributes.max_input_size as usize;
+        // let max_input_len = attributes.max_input_size as usize;
         let max_output_len = attributes.max_output_size as usize;
         let termination_bit = memory_layout.termination as usize;
 
+        // TODO: The verifier must check that input_len does not exceed max_input_len.
+        // TODO: The verifier must check that the input is valid.
+
+        let mut elems = Punctuated::new();
+        for (_name, ty) in &self.func_args {
+            elems.push(*ty.clone());
+        };
+        let input_tuple_type = Type::Tuple(TypeTuple {
+            paren_token: Paren::default(),
+            elems,
+        });
+
+        let input_len_size = std::mem::size_of::<rend::u64_le>();
         let get_input_slice = quote! {
-            let input_ptr = #input_start as *const u8;
+            // First word is size of input buffer (u64_le).
+            // TODO: If we modify rkyv to store inputs up front in the buffer, we can get rid of this.
+            let input_len = #input_start as *const rend::u64_le;
+            let input_ptr = (#input_start + #input_len_size) as *const u8;
             let input_slice = unsafe {
-                core::slice::from_raw_parts(input_ptr, #max_input_len)
+                core::slice::from_raw_parts(input_ptr, *input_len)
             };
+            let input_args = unsafe { rkyv::access_unchecked::<#input_tuple_type>(input_slice) };
         };
 
         let args = &self.func_args;
-        let args_fetch = args.iter().map(|(name, ty)| {
+        let args_fetch = args.iter().enumerate().map(|(i, (name, _ty))| {
+            let i = syn::Index::from(i);
             quote! {
-                let (#name, input_slice) =
-                    jolt::postcard::take_from_bytes::<#ty>(input_slice).unwrap();
+                let #name = input_args.#i
             }
         });
 
