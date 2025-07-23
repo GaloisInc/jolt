@@ -1,13 +1,13 @@
 use itertools::Itertools;
 use rayon::prelude::*;
-use tracer::instruction::RV32IMCycle;
+use tracer::{instruction::RV32IMCycle, LazyTraceIterator};
 
 use crate::{
     field::JoltField,
     jolt::vm::{instruction_lookups, ram::remap_address, JoltProverPreprocessing},
     poly::{
         commitment::commitment_scheme::CommitmentScheme,
-        multilinear_polynomial::MultilinearPolynomial, one_hot_polynomial::OneHotPolynomial,
+        multilinear_polynomial::{MultilinearPolynomial, StreamingPolynomial}, one_hot_polynomial::OneHotPolynomial,
     },
 };
 
@@ -248,5 +248,17 @@ impl CommittedPolynomials {
                 ))
             }
         }
+    }
+
+    pub fn generate_streaming_witness<F, PCS>(
+        &self,
+        preprocessing: &JoltProverPreprocessing<F, PCS>,
+        trace: Vec<std::iter::Take<LazyTraceIterator>>,
+    ) -> StreamingPolynomial<F>
+    where
+        F: JoltField,
+        PCS: CommitmentScheme<Field = F>,
+    {
+        todo!()
     }
 }

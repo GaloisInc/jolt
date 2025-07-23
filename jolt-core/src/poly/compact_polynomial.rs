@@ -95,6 +95,11 @@ impl SmallScalar for i64 {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StreamingCompactPolynomial<T: SmallScalar, F: JoltField> {
+    phantom: std::marker::PhantomData<fn(T, F)>,
+}
+
 /// Compact polynomials are used to store coefficients of small scalars.
 /// They have two representations:
 /// 1. `coeffs` is a vector of small scalars
