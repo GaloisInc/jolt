@@ -63,7 +63,7 @@ impl<F: JoltField> CanonicalSerialize for MultilinearPolynomial<F> {
 
 /// Wrapper enum for the various streaming polynomial types used in Jolt
 #[repr(u8)]
-#[derive(Clone, Debug, EnumIter, PartialEq)]
+// #[derive(Clone, Debug, EnumIter)]
 pub enum StreamingPolynomial<F: JoltField> {
     LargeScalars(StreamingDensePolynomial<F>),
     U8Scalars(StreamingCompactPolynomial<u8, F>),

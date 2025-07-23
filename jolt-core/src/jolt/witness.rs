@@ -13,8 +13,7 @@ use crate::{
         JoltProverPreprocessing,
     },
     poly::{
-        commitment::commitment_scheme::CommitmentScheme,
-        multilinear_polynomial::{MultilinearPolynomial, StreamingPolynomial}, one_hot_polynomial::OneHotPolynomial,
+        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactPolynomial, multilinear_polynomial::{MultilinearPolynomial, StreamingPolynomial}, one_hot_polynomial::OneHotPolynomial
     },
     utils::math::Math,
 };
@@ -346,13 +345,30 @@ impl CommittedPolynomial {
     pub fn generate_streaming_witness<F, PCS>(
         &self,
         preprocessing: &JoltProverPreprocessing<F, PCS>,
-        trace: Vec<std::iter::Take<LazyTraceIterator>>,
+        trace: Vec<std::iter::Take<LazyTraceIterator>>, // TODO(JP): Eventually we probably want to share a stream, otherwise we need to clone the trace and rerun the trace for each polynomial.
     ) -> StreamingPolynomial<F>
     where
         F: JoltField,
         PCS: CommitmentScheme<Field = F>,
     {
-        todo!()
+        match self {
+            CommittedPolynomials::LeftInstructionInput => {
+                let f = |cycle: &RV32IMCycle| LookupQuery::<32>::to_instruction_inputs(cycle).0; // TODO(JP): Instead of passing a Box for the closure, define a trait instead?
+                let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
+                StreamingPolynomial::U64Scalars(polynomial)
+            },
+            CommittedPolynomials::RightInstructionInput => todo!(),
+            CommittedPolynomials::Product => todo!(),
+            CommittedPolynomials::WriteLookupOutputToRD => todo!(),
+            CommittedPolynomials::WritePCtoRD => todo!(),
+            CommittedPolynomials::ShouldBranch => todo!(),
+            CommittedPolynomials::ShouldJump => todo!(),
+            CommittedPolynomials::BytecodeRa => todo!(),
+            CommittedPolynomials::RamRa(_) => todo!(),
+            CommittedPolynomials::RdInc => todo!(),
+            CommittedPolynomials::RamInc => todo!(),
+            CommittedPolynomials::InstructionRa(_) => todo!(),
+        }
     }
 }
 
