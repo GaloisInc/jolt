@@ -1,3 +1,5 @@
+use std::iter::Take;
+use std::marker::PhantomData;
 use std::ops::Index;
 
 use super::multilinear_polynomial::{BindingOrder, PolynomialBinding};
@@ -7,6 +9,8 @@ use crate::utils::thread::unsafe_allocate_zero_vec;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use num_integer::Integer;
 use rayon::prelude::*;
+use tracer::instruction::RV32IMCycle;
+use tracer::LazyTraceIterator;
 use std::cmp::Ordering;
 
 /// A trait for small scalars ({u/i}{8/16/32/64})
@@ -95,9 +99,21 @@ impl SmallScalar for i64 {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
 pub struct StreamingCompactPolynomial<T: SmallScalar, F: JoltField> {
-    phantom: std::marker::PhantomData<fn(T, F)>,
+    trace_checkpoints: Vec<Take<LazyTraceIterator>>,
+    compute_witness: Box<dyn for <'a> Fn(&'a RV32IMCycle) -> T>,
+    phantom: PhantomData<fn(F)>,
+}
+
+impl<T: SmallScalar + 'static, F: JoltField> StreamingCompactPolynomial<T, F> {
+    pub(crate) fn new(trace: Vec<std::iter::Take<tracer::LazyTraceIterator>>, f: Box<dyn Fn(&RV32IMCycle) -> T>) -> Self
+    {
+        Self {
+            trace_checkpoints: trace,
+            compute_witness: Box::new(f),
+            phantom: PhantomData,
+        }
+    }
 }
 
 /// Compact polynomials are used to store coefficients of small scalars.

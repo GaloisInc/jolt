@@ -21,7 +21,7 @@ use rayon::prelude::*;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug, Default, PartialEq)]
+// #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StreamingOneHotPolynomial<F: JoltField> {
     phantom: std::marker::PhantomData<fn(F)>,
 }
