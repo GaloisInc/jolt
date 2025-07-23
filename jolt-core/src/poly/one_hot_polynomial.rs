@@ -21,7 +21,7 @@ use crate::utils::thread::unsafe_allocate_zero_vec;
 use ark_ec::CurveGroup;
 use rayon::prelude::*;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+// #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StreamingOneHotPolynomial<F: JoltField> {
     phantom: std::marker::PhantomData<fn(F)>,
 }
