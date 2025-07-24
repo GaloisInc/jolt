@@ -106,7 +106,7 @@ pub struct StreamingCompactPolynomial<T: SmallScalar, F: JoltField> {
 }
 
 impl<T: SmallScalar + 'static, F: JoltField> StreamingCompactPolynomial<T, F> {
-    pub(crate) fn new(trace: Vec<std::iter::Take<tracer::LazyTraceIterator>>, f: Box<dyn Fn(&RV32IMCycle) -> T>) -> Self
+    pub(crate) fn new(trace: Vec<Take<LazyTraceIterator>>, f: Box<dyn Fn(&RV32IMCycle) -> T>) -> Self
     {
         Self {
             trace_checkpoints: trace,

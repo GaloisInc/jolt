@@ -4,6 +4,8 @@
 //! in the Twist/Shout PIOP implementations in Jolt.
 
 use std::cell::RefCell;
+use std::iter::Take;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 use super::multilinear_polynomial::BindingOrder;
@@ -20,10 +22,25 @@ use crate::utils::math::Math;
 use crate::utils::thread::unsafe_allocate_zero_vec;
 use ark_ec::CurveGroup;
 use rayon::prelude::*;
+use tracer::instruction::RV32IMCycle;
+use tracer::LazyTraceIterator;
 
 // #[derive(Clone, Debug, Default, PartialEq)]
-pub struct StreamingOneHotPolynomial<F: JoltField> {
-    phantom: std::marker::PhantomData<fn(F)>,
+pub struct StreamingOneHotPolynomial<'a, F: JoltField> {
+    trace_checkpoints: Vec<Take<LazyTraceIterator>>,
+    compute_witness: Box<dyn for <'b> Fn(&'b RV32IMCycle) -> usize + 'a>,
+    K: usize,
+    phantom: std::marker::PhantomData<fn(&'a F)>,
+}
+impl<'a, F: JoltField> StreamingOneHotPolynomial<'a, F> {
+    pub(crate) fn new(trace: Vec<Take<LazyTraceIterator>>, f: Box<dyn Fn(&RV32IMCycle) -> usize + 'a>, K: usize) -> Self {
+        Self {
+            trace_checkpoints: trace,
+            compute_witness: f,
+            K,
+            phantom: PhantomData,
+        }
+    }
 }
 
 /// Represents a one-hot multilinear polynomial (ra/wa) used
