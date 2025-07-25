@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use crate::field::JoltField;
-use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::commitment::dory::DoryGlobals;
+use crate::poly::commitment::commitment_scheme::{CommitmentScheme, StreamingCommitmentScheme};
+use crate::poly::commitment::hyperkzg::CHUNK_SIZE;
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstance};
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::Transcript;
@@ -19,6 +20,7 @@ use crate::zkvm::witness::{
 };
 use crate::zkvm::ProverDebugInfo;
 use anyhow::Context;
+use itertools::Itertools;
 use rayon::prelude::*;
 
 pub enum JoltDAG {}
@@ -29,7 +31,7 @@ impl JoltDAG {
         'a,
         F: JoltField,
         ProofTranscript: Transcript,
-        PCS: CommitmentScheme<Field = F>,
+        PCS: StreamingCommitmentScheme<Field = F>,///PCS: CommitmentScheme<Field = F>,
     >(
         mut state_manager: StateManager<'a, F, ProofTranscript, PCS>,
     ) -> Result<
@@ -418,24 +420,57 @@ impl JoltDAG {
         let (preprocessing, trace, _program_io, _final_memory_state) =
             prover_state_manager.get_prover_data();
 
-        let committed_polys: Vec<_> = AllCommittedPolynomials::par_iter()
-            .map(|poly| poly.generate_witness(preprocessing, trace))
-            .collect();
-
-        let (commitments, hints): (Vec<PCS::Commitment>, Vec<PCS::OpeningProofHint>) =
-            committed_polys
-                .iter()
-                .map(|poly| PCS::commit(poly, &preprocessing.generators))
-                .unzip();
-        let mut hint_map = HashMap::with_capacity(committed_polys.len());
+        let mut hint_map = HashMap::with_capacity(AllCommittedPolynomials.len());
         for (poly, hint) in AllCommittedPolynomials::iter().zip(hints) {
             hint_map.insert(*poly, hint);
         }
 
-        prover_state_manager.set_commitments(commitments);
+        let trace: LazyTraceIterator = todo!();
+        let size = todo!(); // Remove this from the trait???
 
-        drop_in_background_thread(committed_polys);
+        let init_pcss: Vec<_> = ALL_COMMITTED_POLYNOMIALS
+            .iter()
+            .map(|poly| StreamingCommitmentScheme::initialize(size, preprocessing))
+            .collect();
+        // TODO: Process in chunks with parallelization.
+        // let pcss = trace.chunks(CHUNK_SIZE).into_iter().fold(init_pcss, |pcss, trace_chunk| {
+        let pcss = trace.fold(init_pcss, |pcss, cycle| {
+            // let offset = offset; // TODO: Can we get this from `cycle`?
+            let next_cycle = todo!();
+
+            ALL_COMMITTED_POLYNOMIALS
+                .iter()
+                .zip(pcss.into_iter())
+                .map(|(poly, pcs)| {
+                    let witness = poly.generate_streaming_witness(preprocessing, &cycle, next_cycle);
+                    PCS::process(pcs, witness)
+                })
+                .collect()
+        });
+
+        let commitments: Vec<_> = pcss
+            .into_iter()
+            .map(|pcs| PCS::finalize(pcs))
+            .collect();
+
+        // let committed_polys: Vec<_> = ALL_COMMITTED_POLYNOMIALS
+        //     .par_iter()
+        //     .map(|poly| poly.generate_witness(preprocessing, trace))
+        //     .collect();
+
+        // let commitments: Vec<_> = committed_polys
+        //     .iter()
+        //     .map(|poly| PCS::commit(poly, &preprocessing.generators))
+        //     .collect();
+
+        let jolt_commitments = JoltCommitments {
+            commitments,
+        };
+        self.prover_state_manager.set_commitments(jolt_commitments);//prover_state_manager.set_commitments(commitments);
+
+        // drop_in_background_thread(committed_polys); //AZ why is this commented out?
 
         Ok(hint_map)
     }
 }
+
