@@ -6,7 +6,7 @@ use crate::field::JoltField;
 use crate::host;
 use crate::jolt::vm::rv32i_vm::RV32IJoltVM;
 use crate::jolt::vm::{Jolt, JoltProverPreprocessing, JoltVerifierPreprocessing};
-use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::commitment::commitment_scheme::{CommitmentScheme, StreamingCommitmentScheme};
 use crate::poly::commitment::dory::{DoryCommitmentScheme as Dory, DoryGlobals};
 use crate::poly::commitment::hyperkzg::HyperKZG;
 use crate::subprotocols::shout::ShoutProof;
@@ -252,7 +252,7 @@ where
 fn fibonacci_dag<F, PCS, ProofTranscript>() -> Vec<(tracing::Span, Box<dyn FnOnce()>)>
 where
     F: JoltField,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: StreamingCommitmentScheme<Field = F>,
     ProofTranscript: Transcript,
 {
     prove_example_dag::<u32, PCS, F, ProofTranscript>("fibonacci-guest", &600000u32)
@@ -358,7 +358,7 @@ fn prove_example_dag<T: Serialize, PCS, F, ProofTranscript>(
 ) -> Vec<(tracing::Span, Box<dyn FnOnce()>)>
 where
     F: JoltField,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: StreamingCommitmentScheme<Field = F>,
     ProofTranscript: Transcript,
 {
     let mut tasks = Vec::new();

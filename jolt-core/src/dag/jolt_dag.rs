@@ -406,7 +406,7 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
 
         let init_pcss: Vec<_> = ALL_COMMITTED_POLYNOMIALS
             .iter()
-            .map(|poly| StreamingCommitmentScheme::initialize(size, preprocessing))
+            .map(|_poly| PCS::initialize(size, &preprocessing.generators))
             .collect();
         // TODO: Process in chunks with parallelization.
         // let pcss = trace.chunks(CHUNK_SIZE).into_iter().fold(init_pcss, |pcss, trace_chunk| {
@@ -419,6 +419,7 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
                 .zip(pcss.into_iter())
                 .map(|(poly, pcs)| {
                     let witness = poly.generate_streaming_witness(preprocessing, &cycle, next_cycle);
+                    let witness = witness.to_field(); // JP: Can we leave this as a small value? Is it more efficient?
                     PCS::process(pcs, witness)
                 })
                 .collect()

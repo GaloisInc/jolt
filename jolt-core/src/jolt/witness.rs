@@ -6,7 +6,7 @@ use crate::{
     field::JoltField,
     jolt::vm::{instruction_lookups, ram::remap_address, JoltProverPreprocessing},
     poly::{
-        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactWitness, multilinear_polynomial::{MultilinearPolynomial, StreamingWitness}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotPolynomial, StreamingOneHotWitness}
+        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactWitness, multilinear_polynomial::{MultilinearPolynomial, StreamingWitness}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness}
     },
 };
 

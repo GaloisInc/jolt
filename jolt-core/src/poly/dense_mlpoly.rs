@@ -16,7 +16,7 @@ use super::multilinear_polynomial::BindingOrder;
 
 // #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StreamingDenseWitness<F: JoltField> {
-    value: F,
+    pub value: F,
 }
 
 #[derive(Default, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
