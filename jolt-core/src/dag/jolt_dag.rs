@@ -7,21 +7,24 @@ use crate::jolt::vm::ram::RamDag;
 use crate::jolt::vm::registers::RegistersDag;
 use crate::jolt::vm::JoltCommitments;
 use crate::jolt::witness::ALL_COMMITTED_POLYNOMIALS;
-use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::commitment::commitment_scheme::{CommitmentScheme, StreamingCommitmentScheme};
+use crate::poly::commitment::hyperkzg::CHUNK_SIZE;
 use crate::poly::opening_proof::{OpeningPoint, BIG_ENDIAN};
 use crate::r1cs::spartan::SpartanDag;
 use crate::subprotocols::sumcheck::{BatchableSumcheckInstance, BatchedSumcheck};
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::Transcript;
 use anyhow::Context;
+use itertools::Itertools;
 use rayon::prelude::*;
+use tracer::LazyTraceIterator;
 pub struct JoltDAG<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field = F>>
 {
     prover_state_manager: StateManager<'a, F, ProofTranscript, PCS>,
     verifier_state_manager: StateManager<'a, F, ProofTranscript, PCS>,
 }
 
-impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field = F>>
+impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentScheme<Field = F>>
     JoltDAG<'a, F, ProofTranscript, PCS>
 {
     pub fn new(
@@ -395,27 +398,55 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field 
     // Prover utility to commit to all the polynomials for the PCS
     #[tracing::instrument(skip_all)]
     fn generate_and_commit_polynomials(&mut self) -> Result<(), anyhow::Error> {
-        let (preprocessing, trace, _program_io, _final_memory_state) =
+        let (preprocessing, _trace, _program_io, _final_memory_state) =
             self.prover_state_manager.get_prover_data();
 
-        let committed_polys: Vec<_> = ALL_COMMITTED_POLYNOMIALS
-            .par_iter()
-            .map(|poly| poly.generate_witness(preprocessing, trace))
+        let trace: LazyTraceIterator = todo!();
+        let size = todo!(); // Remove this from the trait???
+
+        let init_pcss: Vec<_> = ALL_COMMITTED_POLYNOMIALS
+            .iter()
+            .map(|poly| StreamingCommitmentScheme::initialize(size, preprocessing))
+            .collect();
+        // TODO: Process in chunks with parallelization.
+        // let pcss = trace.chunks(CHUNK_SIZE).into_iter().fold(init_pcss, |pcss, trace_chunk| {
+        let pcss = trace.fold(init_pcss, |pcss, cycle| {
+            // let offset = offset; // TODO: Can we get this from `cycle`?
+            let next_cycle = todo!();
+
+            ALL_COMMITTED_POLYNOMIALS
+                .iter()
+                .zip(pcss.into_iter())
+                .map(|(poly, pcs)| {
+                    let witness = poly.generate_streaming_witness(preprocessing, &cycle, next_cycle);
+                    PCS::process(pcs, witness)
+                })
+                .collect()
+        });
+
+        let commitments: Vec<_> = pcss
+            .into_iter()
+            .map(|pcs| PCS::finalize(pcs))
             .collect();
 
-        let commitments: Vec<_> = committed_polys
-            .iter()
-            .map(|poly| PCS::commit(poly, &preprocessing.generators))
-            .collect();
+        // let committed_polys: Vec<_> = ALL_COMMITTED_POLYNOMIALS
+        //     .par_iter()
+        //     .map(|poly| poly.generate_witness(preprocessing, trace))
+        //     .collect();
+
+        // let commitments: Vec<_> = committed_polys
+        //     .iter()
+        //     .map(|poly| PCS::commit(poly, &preprocessing.generators))
+        //     .collect();
 
         let jolt_commitments = JoltCommitments {
-            commitments: commitments.clone(),
+            commitments,
         };
-
         self.prover_state_manager.set_commitments(jolt_commitments);
 
-        drop_in_background_thread(committed_polys);
+        // drop_in_background_thread(committed_polys);
 
         Ok(())
     }
 }
+

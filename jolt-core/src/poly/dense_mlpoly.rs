@@ -15,8 +15,8 @@ use rayon::prelude::*;
 use super::multilinear_polynomial::BindingOrder;
 
 // #[derive(Clone, Debug, Default, PartialEq)]
-pub struct StreamingDensePolynomial<F: JoltField> {
-    phantom: std::marker::PhantomData<fn(F)>,
+pub struct StreamingDenseWitness<F: JoltField> {
+    value: F,
 }
 
 #[derive(Default, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]

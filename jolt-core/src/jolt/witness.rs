@@ -6,7 +6,7 @@ use crate::{
     field::JoltField,
     jolt::vm::{instruction_lookups, ram::remap_address, JoltProverPreprocessing},
     poly::{
-        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactPolynomial, multilinear_polynomial::{MultilinearPolynomial, StreamingPolynomial}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotPolynomial}
+        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactWitness, multilinear_polynomial::{MultilinearPolynomial, StreamingWitness}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotPolynomial, StreamingOneHotWitness}
     },
 };
 
@@ -71,6 +71,69 @@ pub const ALL_COMMITTED_POLYNOMIALS: [CommittedPolynomials; 19] = [
     CommittedPolynomials::InstructionRa(6),
     CommittedPolynomials::InstructionRa(7),
 ];
+
+trait Witness {
+    type Type;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type;
+}
+
+impl Witness for LeftInstructionInput {
+    type Type = u64;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
+        LookupQuery::<32>::to_instruction_inputs(cycle).0
+    }
+}
+
+impl Witness for ShouldJump {
+    type Type = u8;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
+        let is_jump = cycle.instruction().circuit_flags()[CircuitFlags::Jump];
+        let is_next_noop =
+            next_cycle.instruction().circuit_flags()[CircuitFlags::IsNoop];
+        is_jump as u8 * (1 - is_next_noop as u8)
+    }
+}
+
+impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>> Witness for BytecodeRa<'a, F, PCS> {
+    type Type = usize;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
+        self.preprocessing.shared.bytecode.get_pc(cycle)
+    } // TODO: K = preprocessing.shared.bytecode.code_size,
+}
+
+impl Witness for RamRa {
+    type Type = usize;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
+        let lookup_index = LookupQuery::<32>::to_lookup_index(cycle);
+        let k = (lookup_index
+            >> (instruction_lookups::LOG_K_CHUNK
+                * (instruction_lookups::D - 1 - self.i)))
+            % instruction_lookups::K_CHUNK as u64;
+        k as usize
+    }
+}
+
+pub struct LeftInstructionInput; // (pub u64);
+pub struct RightInstructionInput; // (pub i64);
+pub struct Product; // (pub u64);
+pub struct WriteLookupOutputToRD; // (pub u8);
+pub struct WritePCtoRD; // (pub u8);
+pub struct ShouldBranch; // (pub u8);
+pub struct ShouldJump; // (pub u8);
+pub struct BytecodeRa<'a, F: JoltField, PCS: CommitmentScheme<Field = F>> {
+    preprocessing: &'a JoltProverPreprocessing<F, PCS>,
+}
+pub struct RamRa {
+    i: usize,
+}
+pub struct RdInc; // (pub i64);
+pub struct RamInc; // (pub i64);
+pub struct InstructionRa; // (pub usize);
 
 impl CommittedPolynomials {
     pub fn len() -> usize {
@@ -252,82 +315,89 @@ impl CommittedPolynomials {
     pub fn generate_streaming_witness<'a, F, PCS>(
         &self,
         preprocessing: &'a JoltProverPreprocessing<F, PCS>,
-        trace: Vec<std::iter::Take<LazyTraceIterator>>, // TODO(JP): Eventually we probably want to share a stream, otherwise we need to clone the trace and rerun the trace for each polynomial.
-    ) -> StreamingPolynomial<'a, F>
+        cycle: &RV32IMCycle,
+        next_cycle: &RV32IMCycle,
+    ) -> StreamingWitness<F>
     where
         F: JoltField,
         PCS: CommitmentScheme<Field = F>,
     {
         match self {
             CommittedPolynomials::LeftInstructionInput => {
-                let f = |cycle: &RV32IMCycle| LookupQuery::<32>::to_instruction_inputs(cycle).0; // TODO(JP): Instead of passing a Box for the closure, define a trait instead?
-                let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
-                StreamingPolynomial::U64Scalars(polynomial)
+                let v = LookupQuery::<32>::to_instruction_inputs(cycle).0;
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::U64Scalars(witness)
             }
             CommittedPolynomials::RightInstructionInput => {
-                let f = |cycle: &RV32IMCycle| LookupQuery::<32>::to_instruction_inputs(cycle).1;
-                let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
-                StreamingPolynomial::I64Scalars(polynomial)
+                let v = LookupQuery::<32>::to_instruction_inputs(cycle).1;
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::I64Scalars(witness)
             }
             CommittedPolynomials::Product => {
-                let f = |cycle: &RV32IMCycle| {
+                let v = {
                     let (left_input, right_input) =
                         LookupQuery::<32>::to_instruction_inputs(cycle);
                     left_input * right_input as u64
                 };
-                let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
-                StreamingPolynomial::U64Scalars(polynomial)
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::U64Scalars(witness)
             }
             CommittedPolynomials::WriteLookupOutputToRD => {
-                let f = |cycle: &RV32IMCycle| {
+                let v = {
                     let flag = cycle.instruction().circuit_flags()
                         [CircuitFlags::WriteLookupOutputToRD as usize];
                     (cycle.rd_write().0 as u8) * (flag as u8)
                 };
-                let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
-                StreamingPolynomial::U8Scalars(polynomial)
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::U8Scalars(witness)
             }
             CommittedPolynomials::WritePCtoRD => {
-                let f = |cycle: &RV32IMCycle| {
+                let v = {
                     let flag = cycle.instruction().circuit_flags()[CircuitFlags::Jump as usize];
                     (cycle.rd_write().0 as u8) * (flag as u8)
                 };
-                let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
-                StreamingPolynomial::U8Scalars(polynomial)
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::U8Scalars(witness)
             }
             CommittedPolynomials::ShouldBranch => {
-                let f = |cycle: &RV32IMCycle| {
+                let v = {
                     let is_branch =
                         cycle.instruction().circuit_flags()[CircuitFlags::Branch as usize];
                     (LookupQuery::<32>::to_lookup_output(cycle) as u8) * is_branch as u8
                 };
-                let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
-                StreamingPolynomial::U8Scalars(polynomial)
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::U8Scalars(witness)
             }
             CommittedPolynomials::ShouldJump => {
-                todo!("This requires two cycles");
+                let v = {
+                    let is_jump = cycle.instruction().circuit_flags()[CircuitFlags::Jump];
+                    let is_next_noop =
+                        next_cycle.instruction().circuit_flags()[CircuitFlags::IsNoop];
+                    is_jump as u8 * (1 - is_next_noop as u8)
+                };
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::U8Scalars(witness)
             }
             CommittedPolynomials::BytecodeRa => {
-                let f = |cycle: &RV32IMCycle| {
+                let v = {
                     preprocessing.shared.bytecode.get_pc(cycle)
                 };
-                let K = preprocessing.shared.bytecode.code_size;
-                let polynomial = StreamingOneHotPolynomial::<'a, _>::new(trace, Box::new(f), K);
-                StreamingPolynomial::OneHot(polynomial)
+                let witness = StreamingOneHotWitness::new(v);
+                StreamingWitness::OneHot(witness)
             }
             CommittedPolynomials::RamRa(_) => {
                 todo!("This requires doing a full iteration over the trace")
             }
             CommittedPolynomials::RdInc => {
-                let f = |cycle: &RV32IMCycle| {
+                let v = {
                     let (_, pre_value, post_value) = cycle.rd_write();
                     post_value as i64 - pre_value as i64
                 };
-                let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
-                StreamingPolynomial::I64Scalars(polynomial)
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::I64Scalars(witness)
             }
             CommittedPolynomials::RamInc => {
-                let f = |cycle: &RV32IMCycle| {
+                let v = {
                     let ram_op = cycle.ram_access();
                     match ram_op {
                         tracer::instruction::RAMAccess::Write(write) => {
@@ -336,15 +406,14 @@ impl CommittedPolynomials {
                         _ => 0,
                     }
                 };
-                let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
-                StreamingPolynomial::I64Scalars(polynomial)
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::I64Scalars(witness)
             }
             CommittedPolynomials::InstructionRa(i) => {
-                if *i > instruction_lookups::D {
-                    panic!("Unexpected i: {i}");
-                }
-                let i = *i;
-                let f = move |cycle: &RV32IMCycle| {
+                // if *i > instruction_lookups::D {
+                //     panic!("Unexpected i: {i}");
+                // }
+                let v = {
                     let lookup_index = LookupQuery::<32>::to_lookup_index(cycle);
                     let k = (lookup_index
                         >> (instruction_lookups::LOG_K_CHUNK
@@ -353,8 +422,8 @@ impl CommittedPolynomials {
                     k as usize
                 };
 
-                let polynomial = StreamingOneHotPolynomial::<'a, _>::new(trace, Box::new(f), instruction_lookups::K_CHUNK);
-                StreamingPolynomial::OneHot(polynomial)
+                let witness = StreamingOneHotWitness::new(v);
+                StreamingWitness::OneHot(witness)
             }
         }
     }
