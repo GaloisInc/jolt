@@ -13,7 +13,7 @@ use crate::{
         JoltProverPreprocessing,
     },
     poly::{
-        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactWitness, multilinear_polynomial::{MultilinearPolynomial, StreamingWitness}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotPolynomial, StreamingOneHotWitness}
+        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactWitness, multilinear_polynomial::{MultilinearPolynomial, StreamingWitness}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness}
     },
     utils::math::Math,
 };
