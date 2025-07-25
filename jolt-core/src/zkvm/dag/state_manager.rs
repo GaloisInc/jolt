@@ -151,6 +151,49 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field 
     /// constructed using `JoltProof::to_verifier_state_manager`
     #[cfg(test)]
     pub fn new_verifier(
+<<<<<<< HEAD:jolt-core/src/zkvm/dag/state_manager.rs
+=======
+        verifier_accumulator: Rc<RefCell<VerifierOpeningAccumulator<F>>>,
+        transcript: Rc<RefCell<ProofTranscript>>,
+        proofs: Rc<RefCell<Proofs<F, PCS, ProofTranscript>>>,
+        commitments: Rc<RefCell<Option<JoltCommitments<F, PCS>>>>,
+    ) -> Self {
+        Self {
+            transcript,
+            proofs,
+            commitments,
+            prover_state: None,
+            verifier_state: Some(VerifierState {
+                preprocessing: None,
+                program_io: None,
+                trace_length: None,
+                accumulator: verifier_accumulator,
+            }),
+        }
+    }
+
+    pub fn set_prover_data(
+        &mut self,
+        preprocessing: &'a JoltProverPreprocessing<F, PCS>,
+        lazy_trace: LazyTraceIterator,
+        trace: Vec<RV32IMCycle>,
+        program_io: JoltDevice,
+        final_memory_state: Memory,
+    ) {
+        if let Some(ref mut prover_state) = self.prover_state {
+            prover_state.preprocessing = Some(preprocessing);
+            prover_state.lazy_trace = Some(lazy_trace);
+            prover_state.trace = Some(trace);
+            prover_state.program_io = Some(program_io);
+            prover_state.final_memory_state = Some(final_memory_state);
+        } else {
+            panic!("Prover state not initialized");
+        }
+    }
+
+    pub fn set_verifier_data(
+        &mut self,
+>>>>>>> 188e56ba (Pass through LazyTraceIterator):jolt-core/src/dag/state_manager.rs
         preprocessing: &'a JoltVerifierPreprocessing<F, PCS>,
         program_io: JoltDevice,
         trace_length: usize,
