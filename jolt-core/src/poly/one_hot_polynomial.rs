@@ -29,7 +29,7 @@ use tracer::LazyTraceIterator;
 
 // #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StreamingOneHotWitness<F: JoltField> {
-    value: usize, // JP: ??
+    pub value: usize, // JP: ???
     phantom: PhantomData<fn(F)>,
 }
 impl<F: JoltField> StreamingOneHotWitness<F> {

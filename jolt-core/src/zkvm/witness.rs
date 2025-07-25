@@ -11,7 +11,7 @@ use tracer::{instruction::RV32IMCycle, LazyTraceIterator};
 use crate::{
     field::JoltField,
     poly::{
-        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactPolynomial, multilinear_polynomial::{MultilinearPolynomial, StreamingPolynomial}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotPolynomial}
+        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactWitness, multilinear_polynomial::{MultilinearPolynomial, StreamingWitness}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness}
     },
     utils::math::Math,
     zkvm::{

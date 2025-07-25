@@ -1,6 +1,6 @@
 #![allow(static_mut_refs)]
 
-use super::commitment_scheme::CommitmentScheme;
+use super::commitment_scheme::{CommitmentScheme, StreamingCommitmentScheme};
 use crate::{
     field::JoltField,
     msm::VariableBaseMSM,
@@ -1230,6 +1230,22 @@ impl CommitmentScheme for DoryCommitmentScheme {
 
     fn protocol_name() -> &'static [u8] {
         b"dory_commitment_scheme"
+    }
+}
+
+impl StreamingCommitmentScheme for DoryCommitmentScheme {
+    type State<'a> = ();
+
+    fn initialize<'a>(size: usize, setup: &'a Self::ProverSetup) -> Self::State<'a> {
+        todo!()
+    }
+
+    fn process<'a>(state: Self::State<'a>, eval: Self::Field) -> Self::State<'a> {
+        todo!()
+    }
+
+    fn finalize<'a>(state: Self::State<'a>) -> Self::Commitment {
+        todo!()
     }
 }
 
