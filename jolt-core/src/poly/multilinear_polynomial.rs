@@ -1,5 +1,5 @@
 use crate::{
-    poly::{compact_polynomial::StreamingCompactPolynomial, dense_mlpoly::StreamingDensePolynomial, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotPolynomial}, rlc_polynomial::{RLCPolynomial, StreamingRLCPolynomial}},
+    poly::{compact_polynomial::StreamingCompactWitness, dense_mlpoly::StreamingDenseWitness, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness}, rlc_polynomial::{RLCPolynomial, StreamingRLCPolynomial}},
     utils::{compute_dotproduct, math::Math},
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Valid};
@@ -61,18 +61,18 @@ impl<F: JoltField> CanonicalSerialize for MultilinearPolynomial<F> {
     }
 }
 
-/// Wrapper enum for the various streaming polynomial types used in Jolt
+/// Wrapper enum for the various streaming witness types used in Jolt
 #[repr(u8)]
 // #[derive(Clone, Debug, EnumIter)]
-pub enum StreamingPolynomial<'a, F: JoltField> {
-    LargeScalars(StreamingDensePolynomial<F>),
-    U8Scalars(StreamingCompactPolynomial<u8, F>),
-    U16Scalars(StreamingCompactPolynomial<u16, F>),
-    U32Scalars(StreamingCompactPolynomial<u32, F>),
-    U64Scalars(StreamingCompactPolynomial<u64, F>),
-    I64Scalars(StreamingCompactPolynomial<i64, F>),
+pub enum StreamingWitness<F: JoltField> {
+    LargeScalars(StreamingDenseWitness<F>),
+    U8Scalars(StreamingCompactWitness<u8, F>),
+    U16Scalars(StreamingCompactWitness<u16, F>),
+    U32Scalars(StreamingCompactWitness<u32, F>),
+    U64Scalars(StreamingCompactWitness<u64, F>),
+    I64Scalars(StreamingCompactWitness<i64, F>),
     RLC(StreamingRLCPolynomial<F>),
-    OneHot(StreamingOneHotPolynomial<'a, F>),
+    OneHot(StreamingOneHotWitness<F>),
 }
 
 /// The order in which polynomial variables are bound in sumcheck

@@ -99,18 +99,15 @@ impl SmallScalar for i64 {
     }
 }
 
-pub struct StreamingCompactPolynomial<T: SmallScalar, F: JoltField> {
-    trace_checkpoints: Vec<Take<LazyTraceIterator>>,
-    compute_witness: Box<dyn for <'a> Fn(&'a RV32IMCycle) -> T>,
+pub struct StreamingCompactWitness<T: SmallScalar, F: JoltField> {
+    pub value: T,
     phantom: PhantomData<fn(F)>,
 }
 
-impl<T: SmallScalar + 'static, F: JoltField> StreamingCompactPolynomial<T, F> {
-    pub(crate) fn new(trace: Vec<Take<LazyTraceIterator>>, f: Box<dyn Fn(&RV32IMCycle) -> T>) -> Self
-    {
+impl<T: SmallScalar, F: JoltField> StreamingCompactWitness<T, F> {
+    pub(crate) fn new(v: T) -> Self {
         Self {
-            trace_checkpoints: trace,
-            compute_witness: Box::new(f),
+            value: v,
             phantom: PhantomData,
         }
     }

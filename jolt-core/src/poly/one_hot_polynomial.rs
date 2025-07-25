@@ -27,18 +27,14 @@ use tracer::instruction::RV32IMCycle;
 use tracer::LazyTraceIterator;
 
 // #[derive(Clone, Debug, Default, PartialEq)]
-pub struct StreamingOneHotPolynomial<'a, F: JoltField> {
-    trace_checkpoints: Vec<Take<LazyTraceIterator>>,
-    compute_witness: Box<dyn for <'b> Fn(&'b RV32IMCycle) -> usize + 'a>,
-    K: usize,
-    phantom: std::marker::PhantomData<fn(&'a F)>,
+pub struct StreamingOneHotWitness<F: JoltField> {
+    value: usize, // JP: ??
+    phantom: PhantomData<fn(F)>,
 }
-impl<'a, F: JoltField> StreamingOneHotPolynomial<'a, F> {
-    pub(crate) fn new(trace: Vec<Take<LazyTraceIterator>>, f: Box<dyn Fn(&RV32IMCycle) -> usize + 'a>, K: usize) -> Self {
+impl<F: JoltField> StreamingOneHotWitness<F> {
+    pub(crate) fn new(value: usize) -> Self {
         Self {
-            trace_checkpoints: trace,
-            compute_witness: f,
-            K,
+            value,
             phantom: PhantomData,
         }
     }
