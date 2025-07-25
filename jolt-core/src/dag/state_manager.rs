@@ -120,12 +120,14 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field 
     pub fn set_prover_data(
         &mut self,
         preprocessing: &'a JoltProverPreprocessing<F, PCS>,
+        lazy_trace: LazyTraceIterator,
         trace: Vec<RV32IMCycle>,
         program_io: JoltDevice,
         final_memory_state: Memory,
     ) {
         if let Some(ref mut prover_state) = self.prover_state {
             prover_state.preprocessing = Some(preprocessing);
+            prover_state.lazy_trace = Some(lazy_trace);
             prover_state.trace = Some(trace);
             prover_state.program_io = Some(program_io);
             prover_state.final_memory_state = Some(final_memory_state);

@@ -21,7 +21,7 @@ mod tests {
         let mut program = host::Program::new("fibonacci-guest");
         let inputs = postcard::to_stdvec(&9u32).unwrap();
         let (bytecode, init_memory_state) = program.decode();
-        let (mut trace, final_memory_state, mut io_device) = program.trace(&inputs);
+        let (lazy_trace, mut trace, final_memory_state, mut io_device) = program.trace(&inputs);
 
         // Preprocessing
         let preprocessing: JoltProverPreprocessing<Fr, MockCommitScheme<Fr>> =
@@ -71,6 +71,7 @@ mod tests {
         );
         prover_state_manager.set_prover_data(
             &preprocessing,
+            lazy_trace,
             trace.clone(),
             io_device.clone(),
             final_memory_state.clone(),
