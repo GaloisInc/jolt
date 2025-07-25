@@ -59,7 +59,7 @@ impl<F: JoltField> RASumcheck<F> {
         let log_K = K.log_2();
         let d = (log_K / 8).max(1);
 
-        let (preprocessing, trace, _, _) = state_manager.get_prover_data();
+        let (preprocessing, _, trace, _, _) = state_manager.get_prover_data();
         let T = trace.len();
 
         let r = state_manager

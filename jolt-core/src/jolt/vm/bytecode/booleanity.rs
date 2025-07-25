@@ -52,7 +52,7 @@ impl<F: JoltField> BooleanitySumcheck<F> {
         G: Vec<F>,
         unbound_ra_poly: MultilinearPolynomial<F>,
     ) -> Self {
-        let (preprocessing, trace, _, _) = sm.get_prover_data();
+        let (preprocessing, _, trace, _, _) = sm.get_prover_data();
         let log_K = preprocessing.shared.bytecode.bytecode.len().log_2();
 
         let r_address: Vec<F> = sm.transcript.borrow_mut().challenge_vector(log_K);

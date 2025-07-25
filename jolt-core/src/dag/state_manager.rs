@@ -14,7 +14,7 @@ use crate::subprotocols::sumcheck::SumcheckInstanceProof;
 use crate::utils::transcript::Transcript;
 use tracer::emulator::memory::Memory;
 use tracer::instruction::{RV32IMCycle, RV32IMInstruction};
-use tracer::JoltDevice;
+use tracer::{JoltDevice, LazyTraceIterator};
 
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 pub enum ProofKeys {
@@ -43,6 +43,7 @@ where
 {
     pub preprocessing: Option<&'a JoltProverPreprocessing<F, PCS>>,
     pub trace: Option<Vec<RV32IMCycle>>,
+    pub lazy_trace: Option<LazyTraceIterator>,
     pub program_io: Option<JoltDevice>,
     pub final_memory_state: Option<Memory>,
     pub accumulator: Rc<RefCell<ProverOpeningAccumulator<F, PCS>>>,
@@ -86,6 +87,7 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field 
             commitments,
             prover_state: Some(ProverState {
                 preprocessing: None,
+                lazy_trace: None,
                 trace: None,
                 program_io: None,
                 final_memory_state: None,
@@ -151,6 +153,7 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field 
         &self,
     ) -> (
         &'a JoltProverPreprocessing<F, PCS>,
+        &LazyTraceIterator,
         &Vec<RV32IMCycle>,
         &JoltDevice,
         &Memory,
@@ -158,6 +161,7 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field 
         if let Some(ref prover_state) = self.prover_state {
             (
                 prover_state.preprocessing.expect("Preprocessing not set"),
+                prover_state.lazy_trace.as_ref().expect("Lazy trace not set"),
                 prover_state.trace.as_ref().expect("Trace not set"),
                 prover_state
                     .program_io

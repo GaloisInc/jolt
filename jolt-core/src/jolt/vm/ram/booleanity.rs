@@ -94,7 +94,7 @@ impl<F: JoltField> BooleanitySumcheck<F> {
         let log_K = K.log_2();
         let d = (log_K / 8).max(1);
 
-        let (_, trace, program_io, _) = state_manager.get_prover_data();
+        let (_, _, trace, program_io, _) = state_manager.get_prover_data();
         let memory_layout = &program_io.memory_layout;
 
         let T = trace.len();

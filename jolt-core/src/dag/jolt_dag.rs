@@ -17,6 +17,7 @@ use crate::utils::transcript::Transcript;
 use anyhow::Context;
 use itertools::Itertools;
 use rayon::prelude::*;
+use tracer::instruction::RV32IMCycle;
 use tracer::LazyTraceIterator;
 pub struct JoltDAG<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field = F>>
 {
@@ -39,7 +40,7 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
 
     pub fn prove(&mut self) -> Result<(), anyhow::Error> {
         // Initialize DoryGlobals at the beginning to keep it alive for the entire proof
-        let (preprocessing, trace, _, _) = self.prover_state_manager.get_prover_data();
+        let (preprocessing, _, trace, _, _) = self.prover_state_manager.get_prover_data();
         let trace_length = trace.len();
         let padded_trace_length = trace_length.next_power_of_two();
 
@@ -87,7 +88,7 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
         let span = tracing::span!(tracing::Level::INFO, "Stage 1 sumchecks");
         let _guard = span.enter();
 
-        let (_, trace, _, _) = self.prover_state_manager.get_prover_data();
+        let (_, _, trace, _, _) = self.prover_state_manager.get_prover_data();
         let padded_trace_length = trace.len().next_power_of_two();
         let mut spartan_dag = SpartanDag::<F>::new::<ProofTranscript>(padded_trace_length);
         let mut lookups_dag = LookupsDag::default();
@@ -223,7 +224,7 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
                 .get_prover_accumulator()
                 .borrow()
                 .clone();
-            let (prover_preprocessing, _, _, _) = self.prover_state_manager.get_prover_data();
+            let (prover_preprocessing, _, _, _, _) = self.prover_state_manager.get_prover_data();
             self.verifier_state_manager
                 .get_verifier_accumulator()
                 .borrow_mut()
@@ -398,11 +399,11 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
     // Prover utility to commit to all the polynomials for the PCS
     #[tracing::instrument(skip_all)]
     fn generate_and_commit_polynomials(&mut self) -> Result<(), anyhow::Error> {
-        let (preprocessing, _trace, _program_io, _final_memory_state) =
+        let (preprocessing, lazy_trace, _trace, _program_io, _final_memory_state) =
             self.prover_state_manager.get_prover_data();
 
-        let trace: LazyTraceIterator = todo!();
-        let size = todo!(); // Remove this from the trait???
+        let size = _trace.len(); // Remove this from the trait??? Or get from preprocessing?
+        let trace = lazy_trace.clone();
 
         let init_pcss: Vec<_> = ALL_COMMITTED_POLYNOMIALS
             .iter()
@@ -410,19 +411,24 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
             .collect();
         // TODO: Process in chunks with parallelization.
         // let pcss = trace.chunks(CHUNK_SIZE).into_iter().fold(init_pcss, |pcss, trace_chunk| {
-        let pcss = trace.fold(init_pcss, |pcss, cycle| {
-            // let offset = offset; // TODO: Can we get this from `cycle`?
-            let next_cycle = todo!();
+        let pcss = trace.clone() // TODO(JP): More efficient way to zip_with_self_next
+            .zip(
+                trace
+                    .skip(1)
+                    .chain(std::iter::once(RV32IMCycle::NoOp)),
+            )
+            .fold(init_pcss, |pcss, (cycle, next_cycle)| {
+                // let offset = offset; // TODO: Can we get this from `cycle`?
 
-            ALL_COMMITTED_POLYNOMIALS
-                .iter()
-                .zip(pcss.into_iter())
-                .map(|(poly, pcs)| {
-                    let witness = poly.generate_streaming_witness(preprocessing, &cycle, next_cycle);
-                    let witness = witness.to_field(); // JP: Can we leave this as a small value? Is it more efficient?
-                    PCS::process(pcs, witness)
-                })
-                .collect()
+                ALL_COMMITTED_POLYNOMIALS
+                    .iter()
+                    .zip(pcss.into_iter())
+                    .map(|(poly, pcs)| {
+                        let witness = poly.generate_streaming_witness(preprocessing, &cycle, &next_cycle);
+                        let witness = witness.to_field(); // JP: Can we leave this as a small value? Is it more efficient?
+                        PCS::process(pcs, witness)
+                    })
+                    .collect()
         });
 
         let commitments: Vec<_> = pcss

@@ -98,7 +98,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, T: Transcript> SumcheckStag
         &mut self,
         sm: &mut StateManager<'_, F, T, PCS>,
     ) -> Vec<Box<dyn StagedSumcheck<F, PCS>>> {
-        let (preprocessing, trace, _, _) = sm.get_prover_data();
+        let (preprocessing, _, trace, _, _) = sm.get_prover_data();
         let bytecode_preprocessing = &preprocessing.shared.bytecode;
         let K = bytecode_preprocessing.bytecode.len().next_power_of_two();
 

@@ -93,7 +93,7 @@ impl<'a, F: JoltField> ReadRafSumcheck<F> {
         eq_r_cycle: Vec<F>,
         unbound_ra_polys: Vec<MultilinearPolynomial<F>>,
     ) -> Self {
-        let trace = sm.get_prover_data().1;
+        let trace = sm.get_prover_data().2;
         let log_T = trace.len().log_2();
         let gamma: F = sm.transcript.borrow_mut().challenge_scalar();
         let mut ps = ReadRafProverState::new(trace, eq_r_cycle, unbound_ra_polys);
