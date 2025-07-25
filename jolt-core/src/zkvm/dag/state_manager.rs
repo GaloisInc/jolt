@@ -17,7 +17,7 @@ use num_derive::FromPrimitive;
 use rayon::prelude::*;
 use tracer::emulator::memory::Memory;
 use tracer::instruction::{RV32IMCycle, RV32IMInstruction};
-use tracer::JoltDevice;
+use tracer::{JoltDevice, LazyTraceIterator};
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, FromPrimitive)]
 #[repr(u8)]
@@ -40,9 +40,17 @@ pub struct ProverState<'a, F: JoltField, PCS>
 where
     PCS: CommitmentScheme<Field = F>,
 {
+<<<<<<< HEAD:jolt-core/src/zkvm/dag/state_manager.rs
     pub preprocessing: &'a JoltProverPreprocessing<F, PCS>,
     pub trace: Vec<RV32IMCycle>,
     pub final_memory_state: Memory,
+=======
+    pub preprocessing: Option<&'a JoltProverPreprocessing<F, PCS>>,
+    pub trace: Option<Vec<RV32IMCycle>>,
+    pub lazy_trace: Option<LazyTraceIterator>,
+    pub program_io: Option<JoltDevice>,
+    pub final_memory_state: Option<Memory>,
+>>>>>>> 447a3098 (Pass through LazyTraceIterator):jolt-core/src/dag/state_manager.rs
     pub accumulator: Rc<RefCell<ProverOpeningAccumulator<F>>>,
 }
 
@@ -121,10 +129,19 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field 
             ram_K,
             twist_sumcheck_switch_index,
             prover_state: Some(ProverState {
+<<<<<<< HEAD:jolt-core/src/zkvm/dag/state_manager.rs
                 preprocessing,
                 trace,
                 final_memory_state,
                 accumulator: opening_accumulator,
+=======
+                preprocessing: None,
+                lazy_trace: None,
+                trace: None,
+                program_io: None,
+                final_memory_state: None,
+                accumulator: prover_accumulator,
+>>>>>>> 447a3098 (Pass through LazyTraceIterator):jolt-core/src/dag/state_manager.rs
             }),
             verifier_state: None,
         }
@@ -166,16 +183,31 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field 
         &self,
     ) -> (
         &'a JoltProverPreprocessing<F, PCS>,
+        &LazyTraceIterator,
         &Vec<RV32IMCycle>,
         &JoltDevice,
         &Memory,
     ) {
         if let Some(ref prover_state) = self.prover_state {
             (
+<<<<<<< HEAD:jolt-core/src/zkvm/dag/state_manager.rs
                 prover_state.preprocessing,
                 &prover_state.trace,
                 &self.program_io,
                 &prover_state.final_memory_state,
+=======
+                prover_state.preprocessing.expect("Preprocessing not set"),
+                prover_state.lazy_trace.as_ref().expect("Lazy trace not set"),
+                prover_state.trace.as_ref().expect("Trace not set"),
+                prover_state
+                    .program_io
+                    .as_ref()
+                    .expect("Program IO not set"),
+                prover_state
+                    .final_memory_state
+                    .as_ref()
+                    .expect("Final memory state not set"),
+>>>>>>> 447a3098 (Pass through LazyTraceIterator):jolt-core/src/dag/state_manager.rs
             )
         } else {
             panic!("Prover state not initialized");

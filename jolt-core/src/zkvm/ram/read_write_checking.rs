@@ -71,7 +71,7 @@ impl<F: JoltField> ReadWriteCheckingProverState<F> {
         K: usize,
         state_manager: &mut StateManager<'_, F, ProofTranscript, PCS>,
     ) -> Self {
-        let (preprocessing, trace, program_io, _) = state_manager.get_prover_data();
+        let (preprocessing, _, trace, program_io, _) = state_manager.get_prover_data();
 
         let r_prime = state_manager
             .get_prover_accumulator()
@@ -326,7 +326,13 @@ impl<F: JoltField> RamReadWriteChecking<F> {
         initial_memory_state: &[u32],
         state_manager: &mut StateManager<'_, F, ProofTranscript, PCS>,
     ) -> Self {
+<<<<<<< HEAD:jolt-core/src/zkvm/ram/read_write_checking.rs
         let gamma = state_manager.transcript.borrow_mut().challenge_scalar();
+=======
+        let z = state_manager.transcript.borrow_mut().challenge_scalar();
+        let (_, _, _, program_io, _) = state_manager.get_prover_data();
+        let memory_layout = program_io.memory_layout.clone();
+>>>>>>> 447a3098 (Pass through LazyTraceIterator):jolt-core/src/jolt/vm/ram/read_write_checking.rs
 
         let (_, rv_claim) = state_manager
             .get_prover_accumulator()

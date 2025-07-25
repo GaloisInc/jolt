@@ -22,6 +22,16 @@ use crate::zkvm::ProverDebugInfo;
 use anyhow::Context;
 use itertools::Itertools;
 use rayon::prelude::*;
+<<<<<<< HEAD:jolt-core/src/zkvm/dag/jolt_dag.rs
+=======
+use tracer::instruction::RV32IMCycle;
+use tracer::LazyTraceIterator;
+pub struct JoltDAG<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field = F>>
+{
+    prover_state_manager: StateManager<'a, F, ProofTranscript, PCS>,
+    verifier_state_manager: StateManager<'a, F, ProofTranscript, PCS>,
+}
+>>>>>>> 447a3098 (Pass through LazyTraceIterator):jolt-core/src/dag/jolt_dag.rs
 
 pub enum JoltDAG {}
 
@@ -44,7 +54,11 @@ impl JoltDAG {
         state_manager.fiat_shamir_preamble();
 
         // Initialize DoryGlobals at the beginning to keep it alive for the entire proof
+<<<<<<< HEAD:jolt-core/src/zkvm/dag/jolt_dag.rs
         let (preprocessing, trace, _, _) = state_manager.get_prover_data();
+=======
+        let (preprocessing, _, trace, _, _) = self.prover_state_manager.get_prover_data();
+>>>>>>> 447a3098 (Pass through LazyTraceIterator):jolt-core/src/dag/jolt_dag.rs
         let trace_length = trace.len();
         let padded_trace_length = trace_length.next_power_of_two();
 
@@ -72,7 +86,11 @@ impl JoltDAG {
         let span = tracing::span!(tracing::Level::INFO, "Stage 1 sumchecks");
         let _guard = span.enter();
 
+<<<<<<< HEAD:jolt-core/src/zkvm/dag/jolt_dag.rs
         let (_, trace, _, _) = state_manager.get_prover_data();
+=======
+        let (_, _, trace, _, _) = self.prover_state_manager.get_prover_data();
+>>>>>>> 447a3098 (Pass through LazyTraceIterator):jolt-core/src/dag/jolt_dag.rs
         let padded_trace_length = trace.len().next_power_of_two();
         let mut spartan_dag = SpartanDag::<F>::new::<ProofTranscript>(padded_trace_length);
         let mut lookups_dag = LookupsDag::default();
@@ -417,16 +435,21 @@ impl JoltDAG {
     >(
         prover_state_manager: &mut StateManager<'a, F, ProofTranscript, PCS>,
     ) -> Result<HashMap<CommittedPolynomial, PCS::OpeningProofHint>, anyhow::Error> {
+<<<<<<< HEAD:jolt-core/src/zkvm/dag/jolt_dag.rs
         let (preprocessing, trace, _program_io, _final_memory_state) =
             prover_state_manager.get_prover_data();
+=======
+        let (preprocessing, lazy_trace, _trace, _program_io, _final_memory_state) =
+            self.prover_state_manager.get_prover_data();
+>>>>>>> 447a3098 (Pass through LazyTraceIterator):jolt-core/src/dag/jolt_dag.rs
+
+        let size = _trace.len(); // Remove this from the trait??? Or get from preprocessing?
+        let trace = lazy_trace.clone();
 
         let mut hint_map = HashMap::with_capacity(AllCommittedPolynomials.len());
         for (poly, hint) in AllCommittedPolynomials::iter().zip(hints) {
             hint_map.insert(*poly, hint);
         }
-
-        let trace: LazyTraceIterator = todo!();
-        let size = todo!(); // Remove this from the trait???
 
         let init_pcss: Vec<_> = ALL_COMMITTED_POLYNOMIALS
             .iter()
@@ -434,19 +457,24 @@ impl JoltDAG {
             .collect();
         // TODO: Process in chunks with parallelization.
         // let pcss = trace.chunks(CHUNK_SIZE).into_iter().fold(init_pcss, |pcss, trace_chunk| {
-        let pcss = trace.fold(init_pcss, |pcss, cycle| {
-            // let offset = offset; // TODO: Can we get this from `cycle`?
-            let next_cycle = todo!();
+        let pcss = trace.clone() // TODO(JP): More efficient way to zip_with_self_next
+            .zip(
+                trace
+                    .skip(1)
+                    .chain(std::iter::once(RV32IMCycle::NoOp)),
+            )
+            .fold(init_pcss, |pcss, (cycle, next_cycle)| {
+                // let offset = offset; // TODO: Can we get this from `cycle`?
 
-            ALL_COMMITTED_POLYNOMIALS
-                .iter()
-                .zip(pcss.into_iter())
-                .map(|(poly, pcs)| {
-                    let witness = poly.generate_streaming_witness(preprocessing, &cycle, next_cycle);
-                    let witness = witness.to_field(); // JP: Can we leave this as a small value? Is it more efficient?
-                    PCS::process(pcs, witness)
-                })
-                .collect()
+                ALL_COMMITTED_POLYNOMIALS
+                    .iter()
+                    .zip(pcss.into_iter())
+                    .map(|(poly, pcs)| {
+                        let witness = poly.generate_streaming_witness(preprocessing, &cycle, &next_cycle);
+                        let witness = witness.to_field(); // JP: Can we leave this as a small value? Is it more efficient?
+                        PCS::process(pcs, witness)
+                    })
+                    .collect()
         });
 
         let commitments: Vec<_> = pcss
