@@ -268,7 +268,7 @@ where
     let inputs = postcard::to_stdvec(input).unwrap();
 
     let task = move || {
-        let (trace, final_memory_state, io_device) = program.trace(&inputs);
+        let (_lazy_trace, trace, final_memory_state, io_device) = program.trace(&inputs);
         let (bytecode, init_memory_state) = program.decode();
 
         let preprocessing: JoltProverPreprocessing<F, PCS> = RV32IJoltVM::prover_preprocess(
@@ -333,7 +333,7 @@ where
     let inputs = postcard::to_stdvec(input).unwrap();
 
     let task = move || {
-        let (mut trace, final_memory_state, mut io_device) = program.trace(&inputs);
+        let (lazy_trace, mut trace, final_memory_state, mut io_device) = program.trace(&inputs);
         let (bytecode, init_memory_state) = program.decode();
 
         let preprocessing: JoltProverPreprocessing<F, PCS> = RV32IJoltVM::prover_preprocess(
@@ -378,6 +378,7 @@ where
         );
         prover_state_manager.set_prover_data(
             &preprocessing,
+            lazy_trace,
             trace.clone(),
             io_device.clone(),
             final_memory_state.clone(),
@@ -425,7 +426,7 @@ where
     inputs.append(&mut postcard::to_stdvec(&1000u32).unwrap());
 
     let task = move || {
-        let (mut trace, final_memory_state, mut io_device) = program.trace(&inputs);
+        let (lazy_trace, mut trace, final_memory_state, mut io_device) = program.trace(&inputs);
         let (bytecode, init_memory_state) = program.decode();
 
         let preprocessing: JoltProverPreprocessing<F, PCS> = RV32IJoltVM::prover_preprocess(
