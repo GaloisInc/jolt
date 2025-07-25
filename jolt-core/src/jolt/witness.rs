@@ -72,69 +72,6 @@ pub const ALL_COMMITTED_POLYNOMIALS: [CommittedPolynomials; 19] = [
     CommittedPolynomials::InstructionRa(7),
 ];
 
-trait Witness {
-    type Type;
-
-    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type;
-}
-
-impl Witness for LeftInstructionInput {
-    type Type = u64;
-
-    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
-        LookupQuery::<32>::to_instruction_inputs(cycle).0
-    }
-}
-
-impl Witness for ShouldJump {
-    type Type = u8;
-
-    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
-        let is_jump = cycle.instruction().circuit_flags()[CircuitFlags::Jump];
-        let is_next_noop =
-            next_cycle.instruction().circuit_flags()[CircuitFlags::IsNoop];
-        is_jump as u8 * (1 - is_next_noop as u8)
-    }
-}
-
-impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>> Witness for BytecodeRa<'a, F, PCS> {
-    type Type = usize;
-
-    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
-        self.preprocessing.shared.bytecode.get_pc(cycle)
-    } // TODO: K = preprocessing.shared.bytecode.code_size,
-}
-
-impl Witness for RamRa {
-    type Type = usize;
-
-    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
-        let lookup_index = LookupQuery::<32>::to_lookup_index(cycle);
-        let k = (lookup_index
-            >> (instruction_lookups::LOG_K_CHUNK
-                * (instruction_lookups::D - 1 - self.i)))
-            % instruction_lookups::K_CHUNK as u64;
-        k as usize
-    }
-}
-
-pub struct LeftInstructionInput; // (pub u64);
-pub struct RightInstructionInput; // (pub i64);
-pub struct Product; // (pub u64);
-pub struct WriteLookupOutputToRD; // (pub u8);
-pub struct WritePCtoRD; // (pub u8);
-pub struct ShouldBranch; // (pub u8);
-pub struct ShouldJump; // (pub u8);
-pub struct BytecodeRa<'a, F: JoltField, PCS: CommitmentScheme<Field = F>> {
-    preprocessing: &'a JoltProverPreprocessing<F, PCS>,
-}
-pub struct RamRa {
-    i: usize,
-}
-pub struct RdInc; // (pub i64);
-pub struct RamInc; // (pub i64);
-pub struct InstructionRa; // (pub usize);
-
 impl CommittedPolynomials {
     pub fn len() -> usize {
         ALL_COMMITTED_POLYNOMIALS.len()
