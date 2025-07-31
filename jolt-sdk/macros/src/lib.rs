@@ -400,10 +400,21 @@ impl MacroBuilder {
                 let mut input_bytes = vec![];
                 #(#set_program_args;)*
 
+<<<<<<< HEAD
                 let (jolt_proof, io_device, _) = JoltRV32IM::prove(
                     &preprocessing,
                     &mut program,
                     &input_bytes,
+=======
+                let (_lazy_trace, trace, final_memory_state, io_device) = program.trace(&input_bytes);
+                #handle_return
+
+                let (jolt_proof, output_io_device, _) = RV32IJoltVM::prove(
+                    io_device,
+                    trace,
+                    final_memory_state,
+                    preprocessing,
+>>>>>>> 067142fd (fixed error in provable macro)
                 );
 
                 #handle_return
