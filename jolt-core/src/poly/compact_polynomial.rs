@@ -9,9 +9,9 @@ use crate::utils::thread::unsafe_allocate_zero_vec;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use num_integer::Integer;
 use rayon::prelude::*;
+use std::cmp::Ordering;
 use tracer::instruction::RV32IMCycle;
 use tracer::LazyTraceIterator;
-use std::cmp::Ordering;
 
 /// A trait for small scalars ({u/i}{8/16/32/64})
 pub trait SmallScalar: Copy + Integer + Sync + CanonicalSerialize + CanonicalDeserialize {

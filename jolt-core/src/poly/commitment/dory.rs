@@ -31,14 +31,19 @@ use dory::{
         Pairing as DoryPairing,
     },
 <<<<<<< HEAD
+<<<<<<< HEAD
     commit,
     curve::G2Cache,
     evaluate, setup_with_srs_file,
 =======
     commit, evaluate, setup_with_srs_file, StreamingDory,
 >>>>>>> 2a8e328f (replaced the stubs with streaming dory implementation.)
+=======
+    commit, evaluate, setup_with_srs_file,
+>>>>>>> b76c9f71 (NCC: cargo fmt)
     transcript::Transcript as DoryTranscript,
-    verify, DoryProof, DoryProofBuilder, Polynomial as DoryPolynomial, ProverSetup, VerifierSetup,
+    verify, DoryProof, DoryProofBuilder, Polynomial as DoryPolynomial, ProverSetup, StreamingDory,
+    VerifierSetup,
 };
 
 /// The (padded) length of the execution trace currently being proven

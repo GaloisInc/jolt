@@ -1,6 +1,16 @@
 use crate::{
+<<<<<<< HEAD
     poly::{compact_polynomial::StreamingCompactWitness, dense_mlpoly::StreamingDenseWitness, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness}, rlc_polynomial::{RLCPolynomial, StreamingRLCPolynomial}},
     utils::compute_dotproduct,
+=======
+    poly::{
+        compact_polynomial::StreamingCompactWitness,
+        dense_mlpoly::StreamingDenseWitness,
+        one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness},
+        rlc_polynomial::{RLCPolynomial, StreamingRLCPolynomial},
+    },
+    utils::{compute_dotproduct, math::Math},
+>>>>>>> b76c9f71 (NCC: cargo fmt)
 };
     // poly::{compact_polynomial::StreamingCompactPolynomial, dense_mlpoly::StreamingDensePolynomial, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotPolynomial}, rlc_polynomial::{RLCPolynomial, StreamingRLCPolynomial}},
     // utils::{compute_dotproduct, math::Math},
@@ -81,14 +91,28 @@ pub enum StreamingWitness<F: JoltField> {
 impl<F: JoltField> StreamingWitness<F> {
     pub fn to_field(self) -> F {
         match self {
-            StreamingWitness::LargeScalars(streaming_dense_witness) => streaming_dense_witness.value,
-            StreamingWitness::U8Scalars(streaming_compact_witness) => streaming_compact_witness.value.to_field(),
-            StreamingWitness::U16Scalars(streaming_compact_witness) => streaming_compact_witness.value.to_field(),
-            StreamingWitness::U32Scalars(streaming_compact_witness) => streaming_compact_witness.value.to_field(),
-            StreamingWitness::U64Scalars(streaming_compact_witness) => streaming_compact_witness.value.to_field(),
-            StreamingWitness::I64Scalars(streaming_compact_witness) => streaming_compact_witness.value.to_field(),
+            StreamingWitness::LargeScalars(streaming_dense_witness) => {
+                streaming_dense_witness.value
+            }
+            StreamingWitness::U8Scalars(streaming_compact_witness) => {
+                streaming_compact_witness.value.to_field()
+            }
+            StreamingWitness::U16Scalars(streaming_compact_witness) => {
+                streaming_compact_witness.value.to_field()
+            }
+            StreamingWitness::U32Scalars(streaming_compact_witness) => {
+                streaming_compact_witness.value.to_field()
+            }
+            StreamingWitness::U64Scalars(streaming_compact_witness) => {
+                streaming_compact_witness.value.to_field()
+            }
+            StreamingWitness::I64Scalars(streaming_compact_witness) => {
+                streaming_compact_witness.value.to_field()
+            }
             // StreamingWitness::RLC(streaming_rlcpolynomial) => todo!(),
-            StreamingWitness::OneHot(streaming_one_hot_witness) => (streaming_one_hot_witness.value as u64).to_field(), // JP: ???
+            StreamingWitness::OneHot(streaming_one_hot_witness) => {
+                (streaming_one_hot_witness.value as u64).to_field()
+            } // JP: ???
         }
     }
 }

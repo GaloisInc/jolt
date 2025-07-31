@@ -240,7 +240,10 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Field 
                 &prover_state.final_memory_state,
 =======
                 prover_state.preprocessing.expect("Preprocessing not set"),
-                prover_state.lazy_trace.as_ref().expect("Lazy trace not set"),
+                prover_state
+                    .lazy_trace
+                    .as_ref()
+                    .expect("Lazy trace not set"),
                 prover_state.trace.as_ref().expect("Trace not set"),
                 prover_state
                     .program_io

@@ -11,7 +11,10 @@ use tracer::{instruction::RV32IMCycle, LazyTraceIterator};
 use crate::{
     field::JoltField,
     poly::{
-        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactWitness, multilinear_polynomial::{MultilinearPolynomial, StreamingWitness}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness}
+        commitment::commitment_scheme::CommitmentScheme,
+        compact_polynomial::StreamingCompactWitness,
+        multilinear_polynomial::{MultilinearPolynomial, StreamingWitness},
+        one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness},
     },
     utils::math::Math,
     zkvm::{
@@ -373,9 +376,14 @@ impl CommittedPolynomial {
                 StreamingPolynomial::I64Scalars(polynomial)
             }
             CommittedPolynomials::Product => {
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
                 let f = |cycle: &RV32IMCycle| {
                     let (left_input, right_input) =
                         LookupQuery::<32>::to_instruction_inputs(cycle);
+=======
+                let v = {
+                    let (left_input, right_input) = LookupQuery::<32>::to_instruction_inputs(cycle);
+>>>>>>> b76c9f71 (NCC: cargo fmt):jolt-core/src/jolt/witness.rs
                     left_input * right_input as u64
                 };
                 let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
@@ -411,12 +419,18 @@ impl CommittedPolynomial {
                 todo!("This requires two cycles");
             }
             CommittedPolynomials::BytecodeRa => {
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
                 let f = |cycle: &RV32IMCycle| {
                     preprocessing.shared.bytecode.get_pc(cycle)
                 };
                 let K = preprocessing.shared.bytecode.code_size;
                 let polynomial = StreamingOneHotPolynomial::<'a, _>::new(trace, Box::new(f), K);
                 StreamingPolynomial::OneHot(polynomial)
+=======
+                let v = { preprocessing.shared.bytecode.get_pc(cycle) };
+                let witness = StreamingOneHotWitness::new(v);
+                StreamingWitness::OneHot(witness)
+>>>>>>> b76c9f71 (NCC: cargo fmt):jolt-core/src/jolt/witness.rs
             }
             CommittedPolynomials::RamRa(_) => {
                 todo!("This requires doing a full iteration over the trace")
@@ -450,8 +464,7 @@ impl CommittedPolynomial {
                 let f = move |cycle: &RV32IMCycle| {
                     let lookup_index = LookupQuery::<32>::to_lookup_index(cycle);
                     let k = (lookup_index
-                        >> (instruction_lookups::LOG_K_CHUNK
-                            * (instruction_lookups::D - 1 - i)))
+                        >> (instruction_lookups::LOG_K_CHUNK * (instruction_lookups::D - 1 - i)))
                         % instruction_lookups::K_CHUNK as u64;
                     k as usize
                 };
