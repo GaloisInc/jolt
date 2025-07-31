@@ -13,7 +13,10 @@ use crate::{
         JoltProverPreprocessing,
     },
     poly::{
-        commitment::commitment_scheme::CommitmentScheme, compact_polynomial::StreamingCompactWitness, multilinear_polynomial::{MultilinearPolynomial, StreamingWitness}, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness}
+        commitment::commitment_scheme::CommitmentScheme,
+        compact_polynomial::StreamingCompactWitness,
+        multilinear_polynomial::{MultilinearPolynomial, StreamingWitness},
+        one_hot_polynomial::{OneHotPolynomial, StreamingOneHotWitness},
     },
     utils::math::Math,
 };
@@ -365,8 +368,7 @@ impl CommittedPolynomial {
             }
             CommittedPolynomials::Product => {
                 let v = {
-                    let (left_input, right_input) =
-                        LookupQuery::<32>::to_instruction_inputs(cycle);
+                    let (left_input, right_input) = LookupQuery::<32>::to_instruction_inputs(cycle);
                     left_input * right_input as u64
                 };
                 let witness = StreamingCompactWitness::new(v);
@@ -409,9 +411,7 @@ impl CommittedPolynomial {
                 StreamingWitness::U8Scalars(witness)
             }
             CommittedPolynomials::BytecodeRa => {
-                let v = {
-                    preprocessing.shared.bytecode.get_pc(cycle)
-                };
+                let v = { preprocessing.shared.bytecode.get_pc(cycle) };
                 let witness = StreamingOneHotWitness::new(v);
                 StreamingWitness::OneHot(witness)
             }
@@ -446,8 +446,7 @@ impl CommittedPolynomial {
                 let v = {
                     let lookup_index = LookupQuery::<32>::to_lookup_index(cycle);
                     let k = (lookup_index
-                        >> (instruction_lookups::LOG_K_CHUNK
-                            * (instruction_lookups::D - 1 - i)))
+                        >> (instruction_lookups::LOG_K_CHUNK * (instruction_lookups::D - 1 - i)))
                         % instruction_lookups::K_CHUNK as u64;
                     k as usize
                 };
