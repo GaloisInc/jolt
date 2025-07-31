@@ -464,16 +464,21 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
             .into_iter()
             .map(|pcs| PCS::finalize(pcs))
             .collect();
+        
+        #[cfg(test)]
+        {
+            let committed_polys: Vec<_> = ALL_COMMITTED_POLYNOMIALS
+                .par_iter()
+                .map(|poly| poly.generate_witness(preprocessing, _trace))
+                .collect();
 
-        // let committed_polys: Vec<_> = ALL_COMMITTED_POLYNOMIALS
-        //     .par_iter()
-        //     .map(|poly| poly.generate_witness(preprocessing, trace))
-        //     .collect();
+            let commitments_non_streaming: Vec<_> = committed_polys
+                .iter()
+                .map(|poly| PCS::commit(poly, &preprocessing.generators))
+                .collect();
 
-        // let commitments: Vec<_> = committed_polys
-        //     .iter()
-        //     .map(|poly| PCS::commit(poly, &preprocessing.generators))
-        //     .collect();
+            assert_eq!(commitments, commitments_non_streaming);
+        }
 
         let jolt_commitments = JoltCommitments {
             commitments,
