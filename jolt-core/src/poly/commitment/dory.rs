@@ -30,9 +30,13 @@ use dory::{
         Field as DoryField, Group as DoryGroup, MultiScalarMul as DoryMultiScalarMul,
         Pairing as DoryPairing,
     },
+<<<<<<< HEAD
     commit,
     curve::G2Cache,
     evaluate, setup_with_srs_file,
+=======
+    commit, evaluate, setup_with_srs_file, StreamingDory,
+>>>>>>> 2a8e328f (replaced the stubs with streaming dory implementation.)
     transcript::Transcript as DoryTranscript,
     verify, DoryProof, DoryProofBuilder, Polynomial as DoryPolynomial, ProverSetup, VerifierSetup,
 };
@@ -1234,18 +1238,19 @@ impl CommitmentScheme for DoryCommitmentScheme {
 }
 
 impl StreamingCommitmentScheme for DoryCommitmentScheme {
-    type State<'a> = ();
+    type State<'a> = StreamingDory<'a, JoltBn254>;
 
-    fn initialize<'a>(size: usize, setup: &'a Self::ProverSetup) -> Self::State<'a> {
-        todo!()
+    fn initialize<'a>(_size: usize, setup: &'a Self::ProverSetup) -> Self::State<'a> {
+        let sigma = DoryGlobals::get_num_columns().log_2();
+        StreamingDory::initialize(sigma, setup)
     }
 
     fn process<'a>(state: Self::State<'a>, eval: Self::Field) -> Self::State<'a> {
-        todo!()
+        state.process::<JoltMsmG1>(JoltFieldWrapper(eval))
     }
 
     fn finalize<'a>(state: Self::State<'a>) -> Self::Commitment {
-        todo!()
+        DoryCommitment(state.finalize::<JoltMsmG1>())
     }
 }
 
