@@ -365,6 +365,7 @@ impl CommittedPolynomial {
         PCS: CommitmentScheme<Field = F>,
     {
         match self {
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
             CommittedPolynomials::LeftInstructionInput => {
                 let f = |cycle: &RV32IMCycle| LookupQuery::<32>::to_instruction_inputs(cycle).0; // TODO(JP): Instead of passing a Box for the closure, define a trait instead?
                 let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
@@ -381,6 +382,19 @@ impl CommittedPolynomial {
                     let (left_input, right_input) =
                         LookupQuery::<32>::to_instruction_inputs(cycle);
 =======
+=======
+            CommittedPolynomial::LeftInstructionInput => {
+                let v = LookupQuery::<32>::to_instruction_inputs(cycle).0;
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::U64Scalars(witness)
+            }
+            CommittedPolynomial::RightInstructionInput => {
+                let v = LookupQuery::<32>::to_instruction_inputs(cycle).1;
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::I64Scalars(witness)
+            }
+            CommittedPolynomial::Product => {
+>>>>>>> e0490ec7 (Witness rebase fixes):jolt-core/src/jolt/witness.rs
                 let v = {
                     let (left_input, right_input) = LookupQuery::<32>::to_instruction_inputs(cycle);
 >>>>>>> b76c9f71 (NCC: cargo fmt):jolt-core/src/jolt/witness.rs
@@ -389,8 +403,13 @@ impl CommittedPolynomial {
                 let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
                 StreamingPolynomial::U64Scalars(polynomial)
             }
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
             CommittedPolynomials::WriteLookupOutputToRD => {
                 let f = |cycle: &RV32IMCycle| {
+=======
+            CommittedPolynomial::WriteLookupOutputToRD => {
+                let v = {
+>>>>>>> e0490ec7 (Witness rebase fixes):jolt-core/src/jolt/witness.rs
                     let flag = cycle.instruction().circuit_flags()
                         [CircuitFlags::WriteLookupOutputToRD as usize];
                     (cycle.rd_write().0 as u8) * (flag as u8)
@@ -398,16 +417,26 @@ impl CommittedPolynomial {
                 let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
                 StreamingPolynomial::U8Scalars(polynomial)
             }
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
             CommittedPolynomials::WritePCtoRD => {
                 let f = |cycle: &RV32IMCycle| {
+=======
+            CommittedPolynomial::WritePCtoRD => {
+                let v = {
+>>>>>>> e0490ec7 (Witness rebase fixes):jolt-core/src/jolt/witness.rs
                     let flag = cycle.instruction().circuit_flags()[CircuitFlags::Jump as usize];
                     (cycle.rd_write().0 as u8) * (flag as u8)
                 };
                 let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
                 StreamingPolynomial::U8Scalars(polynomial)
             }
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
             CommittedPolynomials::ShouldBranch => {
                 let f = |cycle: &RV32IMCycle| {
+=======
+            CommittedPolynomial::ShouldBranch => {
+                let v = {
+>>>>>>> e0490ec7 (Witness rebase fixes):jolt-core/src/jolt/witness.rs
                     let is_branch =
                         cycle.instruction().circuit_flags()[CircuitFlags::Branch as usize];
                     (LookupQuery::<32>::to_lookup_output(cycle) as u8) * is_branch as u8
@@ -415,6 +444,7 @@ impl CommittedPolynomial {
                 let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
                 StreamingPolynomial::U8Scalars(polynomial)
             }
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
             CommittedPolynomials::ShouldJump => {
                 todo!("This requires two cycles");
             }
@@ -428,34 +458,74 @@ impl CommittedPolynomial {
                 StreamingPolynomial::OneHot(polynomial)
 =======
                 let v = { preprocessing.shared.bytecode.get_pc(cycle) };
+=======
+            CommittedPolynomial::ShouldJump => {
+                let v = {
+                    let is_jump = cycle.instruction().circuit_flags()[CircuitFlags::Jump];
+                    let is_next_noop =
+                        next_cycle.instruction().circuit_flags()[CircuitFlags::IsNoop];
+                    is_jump as u8 * (1 - is_next_noop as u8)
+                };
+                let witness = StreamingCompactWitness::new(v);
+                StreamingWitness::U8Scalars(witness)
+            }
+            CommittedPolynomial::BytecodeRa(i) => {
+                // TODO: Compute this up front?
+                let d = preprocessing.shared.bytecode.d;
+                let log_K = preprocessing.shared.bytecode.code_size.log_2();
+                let log_K_chunk = log_K.div_ceil(d);
+                let K_chunk = 1 << log_K_chunk;
+                if *i > d {
+                    panic!("Invalid index for bytecode ra: {i}");
+                }
+                let v = {
+                        let pc = preprocessing.shared.bytecode.get_pc(cycle);
+                        (pc >> (log_K_chunk * (d - 1 - i))) % K_chunk
+                };
+>>>>>>> e0490ec7 (Witness rebase fixes):jolt-core/src/jolt/witness.rs
                 let witness = StreamingOneHotWitness::new(v);
                 StreamingWitness::OneHot(witness)
 >>>>>>> b76c9f71 (NCC: cargo fmt):jolt-core/src/jolt/witness.rs
             }
-            CommittedPolynomials::RamRa(_i) => {
-                // if *i > 0 {
-                //     panic!("RAM is implemented for only d=1 currently.");
-                // }
+            CommittedPolynomial::RamRa(i) => {
+                // TODO: Compute this up front?
+                let d = self.ram_d();
+                debug_assert!(*i < d);
                 let v = {
                     remap_address(
                         cycle.ram_access().address() as u64,
                         &preprocessing.shared.memory_layout,
-                    ) as usize
+                    )
+                    .map(|address| {
+                        (address as usize >> (NUM_RA_I_VARS * (d - 1 - i)))
+                            % (1 << NUM_RA_I_VARS)
+                    })
                 };
 
-                let witness = StreamingOneHotWitness::new(v);
+                // TODO: Handle zeroes properly
+                let witness = StreamingOneHotWitness::new(v.unwrap_or(0));
                 StreamingWitness::OneHot(witness)
             }
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
             CommittedPolynomials::RdInc => {
                 let f = |cycle: &RV32IMCycle| {
+=======
+            CommittedPolynomial::RdInc => {
+                let v = {
+>>>>>>> e0490ec7 (Witness rebase fixes):jolt-core/src/jolt/witness.rs
                     let (_, pre_value, post_value) = cycle.rd_write();
                     post_value as i64 - pre_value as i64
                 };
                 let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
                 StreamingPolynomial::I64Scalars(polynomial)
             }
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
             CommittedPolynomials::RamInc => {
                 let f = |cycle: &RV32IMCycle| {
+=======
+            CommittedPolynomial::RamInc => {
+                let v = {
+>>>>>>> e0490ec7 (Witness rebase fixes):jolt-core/src/jolt/witness.rs
                     let ram_op = cycle.ram_access();
                     match ram_op {
                         tracer::instruction::RAMAccess::Write(write) => {
@@ -467,12 +537,20 @@ impl CommittedPolynomial {
                 let polynomial = StreamingCompactPolynomial::new(trace, Box::new(f));
                 StreamingPolynomial::I64Scalars(polynomial)
             }
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
             CommittedPolynomials::InstructionRa(i) => {
                 if *i > instruction_lookups::D {
                     panic!("Unexpected i: {i}");
                 }
                 let i = *i;
                 let f = move |cycle: &RV32IMCycle| {
+=======
+            CommittedPolynomial::InstructionRa(i) => {
+                // if *i > instruction_lookups::D {
+                //     panic!("Unexpected i: {i}");
+                // }
+                let v = {
+>>>>>>> e0490ec7 (Witness rebase fixes):jolt-core/src/jolt/witness.rs
                     let lookup_index = LookupQuery::<32>::to_lookup_index(cycle);
                     let k = (lookup_index
                         >> (instruction_lookups::LOG_K_CHUNK * (instruction_lookups::D - 1 - i)))
@@ -487,7 +565,74 @@ impl CommittedPolynomial {
     }
 }
 
+<<<<<<< HEAD:jolt-core/src/zkvm/witness.rs
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord)]
+=======
+trait Witness {
+    type Type;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type;
+}
+
+impl Witness for LeftInstructionInput {
+    type Type = u64;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
+        LookupQuery::<32>::to_instruction_inputs(cycle).0
+    }
+}
+
+impl Witness for ShouldJump {
+    type Type = u8;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
+        let is_jump = cycle.instruction().circuit_flags()[CircuitFlags::Jump];
+        let is_next_noop =
+            next_cycle.instruction().circuit_flags()[CircuitFlags::IsNoop];
+        is_jump as u8 * (1 - is_next_noop as u8)
+    }
+}
+
+impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>> Witness for BytecodeRa<'a, F, PCS> {
+    type Type = usize;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
+        self.preprocessing.shared.bytecode.get_pc(cycle)
+    } // TODO: K = preprocessing.shared.bytecode.code_size,
+}
+
+impl Witness for RamRa {
+    type Type = usize;
+
+    fn generate_witness(&self, cycle: &RV32IMCycle, next_cycle: &RV32IMCycle) -> Self::Type {
+        let lookup_index = LookupQuery::<32>::to_lookup_index(cycle);
+        let k = (lookup_index
+            >> (instruction_lookups::LOG_K_CHUNK
+                * (instruction_lookups::D - 1 - self.i)))
+            % instruction_lookups::K_CHUNK as u64;
+        k as usize
+    }
+}
+
+pub struct LeftInstructionInput; // (pub u64);
+pub struct RightInstructionInput; // (pub i64);
+pub struct Product; // (pub u64);
+pub struct WriteLookupOutputToRD; // (pub u8);
+pub struct WritePCtoRD; // (pub u8);
+pub struct ShouldBranch; // (pub u8);
+pub struct ShouldJump; // (pub u8);
+pub struct BytecodeRa<'a, F: JoltField, PCS: CommitmentScheme<Field = F>> {
+    preprocessing: &'a JoltProverPreprocessing<F, PCS>,
+}
+pub struct RamRa {
+    i: usize,
+}
+pub struct RdInc; // (pub i64);
+pub struct RamInc; // (pub i64);
+pub struct InstructionRa; // (pub usize);
+
+#[derive(Hash, PartialEq, Eq, Copy, Clone, Debug)]
+>>>>>>> e0490ec7 (Witness rebase fixes):jolt-core/src/jolt/witness.rs
 pub enum VirtualPolynomial {
     SpartanAz,
     SpartanBz,
