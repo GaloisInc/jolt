@@ -356,17 +356,17 @@ impl CommittedPolynomial {
         PCS: CommitmentScheme<Field = F>,
     {
         match self {
-            CommittedPolynomials::LeftInstructionInput => {
+            CommittedPolynomial::LeftInstructionInput => {
                 let v = LookupQuery::<32>::to_instruction_inputs(cycle).0;
                 let witness = StreamingCompactWitness::new(v);
                 StreamingWitness::U64Scalars(witness)
             }
-            CommittedPolynomials::RightInstructionInput => {
+            CommittedPolynomial::RightInstructionInput => {
                 let v = LookupQuery::<32>::to_instruction_inputs(cycle).1;
                 let witness = StreamingCompactWitness::new(v);
                 StreamingWitness::I64Scalars(witness)
             }
-            CommittedPolynomials::Product => {
+            CommittedPolynomial::Product => {
                 let v = {
                     let (left_input, right_input) = LookupQuery::<32>::to_instruction_inputs(cycle);
                     left_input * right_input as u64
@@ -374,7 +374,7 @@ impl CommittedPolynomial {
                 let witness = StreamingCompactWitness::new(v);
                 StreamingWitness::U64Scalars(witness)
             }
-            CommittedPolynomials::WriteLookupOutputToRD => {
+            CommittedPolynomial::WriteLookupOutputToRD => {
                 let v = {
                     let flag = cycle.instruction().circuit_flags()
                         [CircuitFlags::WriteLookupOutputToRD as usize];
@@ -383,7 +383,7 @@ impl CommittedPolynomial {
                 let witness = StreamingCompactWitness::new(v);
                 StreamingWitness::U8Scalars(witness)
             }
-            CommittedPolynomials::WritePCtoRD => {
+            CommittedPolynomial::WritePCtoRD => {
                 let v = {
                     let flag = cycle.instruction().circuit_flags()[CircuitFlags::Jump as usize];
                     (cycle.rd_write().0 as u8) * (flag as u8)
@@ -391,7 +391,7 @@ impl CommittedPolynomial {
                 let witness = StreamingCompactWitness::new(v);
                 StreamingWitness::U8Scalars(witness)
             }
-            CommittedPolynomials::ShouldBranch => {
+            CommittedPolynomial::ShouldBranch => {
                 let v = {
                     let is_branch =
                         cycle.instruction().circuit_flags()[CircuitFlags::Branch as usize];
@@ -400,7 +400,7 @@ impl CommittedPolynomial {
                 let witness = StreamingCompactWitness::new(v);
                 StreamingWitness::U8Scalars(witness)
             }
-            CommittedPolynomials::ShouldJump => {
+            CommittedPolynomial::ShouldJump => {
                 let v = {
                     let is_jump = cycle.instruction().circuit_flags()[CircuitFlags::Jump];
                     let is_next_noop =
@@ -410,26 +410,42 @@ impl CommittedPolynomial {
                 let witness = StreamingCompactWitness::new(v);
                 StreamingWitness::U8Scalars(witness)
             }
-            CommittedPolynomials::BytecodeRa => {
-                let v = { preprocessing.shared.bytecode.get_pc(cycle) };
+            CommittedPolynomial::BytecodeRa(i) => {
+                // TODO: Compute this up front?
+                let d = preprocessing.shared.bytecode.d;
+                let log_K = preprocessing.shared.bytecode.code_size.log_2();
+                let log_K_chunk = log_K.div_ceil(d);
+                let K_chunk = 1 << log_K_chunk;
+                if *i > d {
+                    panic!("Invalid index for bytecode ra: {i}");
+                }
+                let v = {
+                        let pc = preprocessing.shared.bytecode.get_pc(cycle);
+                        (pc >> (log_K_chunk * (d - 1 - i))) % K_chunk
+                };
                 let witness = StreamingOneHotWitness::new(v);
                 StreamingWitness::OneHot(witness)
             }
-            CommittedPolynomials::RamRa(_i) => {
-                // if *i > 0 {
-                //     panic!("RAM is implemented for only d=1 currently.");
-                // }
+            CommittedPolynomial::RamRa(i) => {
+                // TODO: Compute this up front?
+                let d = self.ram_d();
+                debug_assert!(*i < d);
                 let v = {
                     remap_address(
                         cycle.ram_access().address() as u64,
                         &preprocessing.shared.memory_layout,
-                    ) as usize
+                    )
+                    .map(|address| {
+                        (address as usize >> (NUM_RA_I_VARS * (d - 1 - i)))
+                            % (1 << NUM_RA_I_VARS)
+                    })
                 };
 
-                let witness = StreamingOneHotWitness::new(v);
+                // TODO: Handle zeroes properly
+                let witness = StreamingOneHotWitness::new(v.unwrap_or(0));
                 StreamingWitness::OneHot(witness)
             }
-            CommittedPolynomials::RdInc => {
+            CommittedPolynomial::RdInc => {
                 let v = {
                     let (_, pre_value, post_value) = cycle.rd_write();
                     post_value as i64 - pre_value as i64
@@ -437,7 +453,7 @@ impl CommittedPolynomial {
                 let witness = StreamingCompactWitness::new(v);
                 StreamingWitness::I64Scalars(witness)
             }
-            CommittedPolynomials::RamInc => {
+            CommittedPolynomial::RamInc => {
                 let v = {
                     let ram_op = cycle.ram_access();
                     match ram_op {
@@ -450,7 +466,7 @@ impl CommittedPolynomial {
                 let witness = StreamingCompactWitness::new(v);
                 StreamingWitness::I64Scalars(witness)
             }
-            CommittedPolynomials::InstructionRa(i) => {
+            CommittedPolynomial::InstructionRa(i) => {
                 // if *i > instruction_lookups::D {
                 //     panic!("Unexpected i: {i}");
                 // }
@@ -532,7 +548,6 @@ pub struct RdInc; // (pub i64);
 pub struct RamInc; // (pub i64);
 pub struct InstructionRa; // (pub usize);
 
-impl CommittedPolynomials {
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug)]
 pub enum VirtualPolynomial {
     SpartanAz,
