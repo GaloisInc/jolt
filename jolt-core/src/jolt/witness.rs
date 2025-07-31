@@ -322,8 +322,19 @@ impl CommittedPolynomials {
                 let witness = StreamingOneHotWitness::new(v);
                 StreamingWitness::OneHot(witness)
             }
-            CommittedPolynomials::RamRa(_) => {
-                todo!("This requires doing a full iteration over the trace")
+            CommittedPolynomials::RamRa(_i) => {
+                // if *i > 0 {
+                //     panic!("RAM is implemented for only d=1 currently.");
+                // }
+                let v = {
+                    remap_address(
+                        cycle.ram_access().address() as u64,
+                        &preprocessing.shared.memory_layout,
+                    ) as usize
+                };
+
+                let witness = StreamingOneHotWitness::new(v);
+                StreamingWitness::OneHot(witness)
             }
             CommittedPolynomials::RdInc => {
                 let v = {
