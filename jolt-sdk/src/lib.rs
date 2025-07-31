@@ -4,6 +4,7 @@ extern crate jolt_sdk_macros;
 
 pub use jolt_sdk_macros::provable;
 pub use postcard;
+pub use rkyv;
 
 #[cfg(feature = "host")]
 pub mod host_utils;

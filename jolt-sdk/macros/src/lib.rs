@@ -424,16 +424,16 @@ impl MacroBuilder {
             elems,
         });
 
-        let input_len_size = std::mem::size_of::<rend::u64_le>();
+        let input_len_size = std::mem::size_of::<rend::u64_le>() as u64;
         let get_input_slice = quote! {
             // First word is size of input buffer (u64_le).
             // TODO: If we modify rkyv to store inputs up front in the buffer, we can get rid of this.
-            let input_len = #input_start as *const rend::u64_le;
+            let input_len = #input_start as *const jolt::rkyv::rend::u64_le;
             let input_ptr = (#input_start + #input_len_size) as *const u8;
             let input_slice = unsafe {
-                core::slice::from_raw_parts(input_ptr, *input_len)
+                core::slice::from_raw_parts(input_ptr, (*input_len).to_native().try_into().unwrap())
             };
-            let input_args = unsafe { rkyv::access_unchecked::<#input_tuple_type>(input_slice) };
+            let input_args = unsafe { jolt::rkyv::access_unchecked::<#input_tuple_type>(input_slice) };
         };
 
         let args = &self.func_args;
