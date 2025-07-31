@@ -197,7 +197,11 @@ impl JoltDAG {
         drop(span);
 
         // Batch-prove all openings
+<<<<<<< HEAD:jolt-core/src/zkvm/dag/jolt_dag.rs
         let (_, trace, _, _) = state_manager.get_prover_data();
+=======
+        let (_, _, trace, _, _) = self.prover_state_manager.get_prover_data();
+>>>>>>> a7c429ed (Rebase fixes):jolt-core/src/dag/jolt_dag.rs
         let mut polynomials_map = HashMap::new();
         for polynomial in AllCommittedPolynomials::iter() {
             polynomials_map.insert(
@@ -446,13 +450,13 @@ impl JoltDAG {
         let size = _trace.len(); // Remove this from the trait??? Or get from preprocessing?
         let trace = lazy_trace.clone();
 
-        let mut hint_map = HashMap::with_capacity(AllCommittedPolynomials.len());
+        let hints: Vec<PCS::OpeningProofHint> = todo!("Compute hints in a streaming manner");
+        let mut hint_map = HashMap::with_capacity(AllCommittedPolynomials::len());
         for (poly, hint) in AllCommittedPolynomials::iter().zip(hints) {
             hint_map.insert(*poly, hint);
         }
 
-        let init_pcss: Vec<_> = ALL_COMMITTED_POLYNOMIALS
-            .iter()
+        let init_pcss: Vec<_> = AllCommittedPolynomials::iter()
             .map(|_poly| PCS::initialize(size, &preprocessing.generators))
             .collect();
         // TODO: Process in chunks with parallelization.
@@ -466,8 +470,7 @@ impl JoltDAG {
             .fold(init_pcss, |pcss, (cycle, next_cycle)| {
                 // let offset = offset; // TODO: Can we get this from `cycle`?
 
-                ALL_COMMITTED_POLYNOMIALS
-                    .iter()
+                AllCommittedPolynomials::iter()
                     .zip(pcss.into_iter())
                     .map(|(poly, pcs)| {
                         let witness = poly.generate_streaming_witness(preprocessing, &cycle, &next_cycle);
@@ -481,14 +484,13 @@ impl JoltDAG {
 
         #[cfg(test)]
         {
-            let committed_polys: Vec<_> = ALL_COMMITTED_POLYNOMIALS
-                .par_iter()
+            let committed_polys: Vec<_> = AllCommittedPolynomials::par_iter()
                 .map(|poly| poly.generate_witness(preprocessing, _trace))
                 .collect();
 
             let commitments_non_streaming: Vec<_> = committed_polys
                 .iter()
-                .map(|poly| PCS::commit(poly, &preprocessing.generators))
+                .map(|poly| PCS::commit(poly, &preprocessing.generators).0)
                 .collect();
 
             assert_eq!(commitments, commitments_non_streaming);

@@ -116,8 +116,18 @@ fn sha2() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     prove_example("sha2-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap())
 }
 
+<<<<<<< HEAD
 fn sha3() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     prove_example("sha3-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap())
+=======
+fn sha2<F, PCS, ProofTranscript>() -> Vec<(tracing::Span, Box<dyn FnOnce()>)>
+where
+    F: JoltField,
+    PCS: StreamingCommitmentScheme<Field = F>,
+    ProofTranscript: Transcript,
+{
+    prove_example_dag::<Vec<u8>, PCS, F, ProofTranscript>("sha2-guest", &vec![5u8; 10000])
+>>>>>>> a7c429ed (Rebase fixes)
 }
 
 fn sha2_chain() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
@@ -268,7 +278,7 @@ where
 fn sha2chain<F, PCS, ProofTranscript>() -> Vec<(tracing::Span, Box<dyn FnOnce()>)>
 where
     F: JoltField,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: StreamingCommitmentScheme<Field = F>,
     ProofTranscript: Transcript,
 {
     let mut tasks = Vec::new();
@@ -325,6 +335,7 @@ where
         );
         prover_state_manager.set_prover_data(
             &preprocessing,
+            lazy_trace,
             trace.clone(),
             io_device.clone(),
             final_memory_state.clone(),

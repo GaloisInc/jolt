@@ -127,6 +127,16 @@ impl AllCommittedPolynomials {
                 .par_iter()
         }
     }
+
+    pub fn len() -> usize {
+        unsafe {
+            ALL_COMMITTED_POLYNOMIALS
+                .get()
+                .expect("ALL_COMMITTED_POLYNOMIALS is uninitialized")
+                .len()
+        }
+    }
+
 }
 
 impl Drop for AllCommittedPolynomials {
