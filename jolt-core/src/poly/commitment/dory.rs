@@ -32,9 +32,10 @@ use dory::{
         Field as DoryField, Group as DoryGroup, MultiScalarMul as DoryMultiScalarMul,
         Pairing as DoryPairing,
     },
-    commit, evaluate, setup_with_srs_file, StreamingDory,
+    commit, evaluate, setup_with_srs_file,
     transcript::Transcript as DoryTranscript,
-    verify, DoryProof, DoryProofBuilder, Polynomial as DoryPolynomial, ProverSetup, VerifierSetup,
+    verify, DoryProof, DoryProofBuilder, Polynomial as DoryPolynomial, ProverSetup, StreamingDory,
+    VerifierSetup,
 };
 
 /// The (padded) length of the execution trace currently being proven

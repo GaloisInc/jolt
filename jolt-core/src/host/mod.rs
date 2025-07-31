@@ -17,7 +17,8 @@ use common::{
 use rayon::prelude::*;
 use tracer::{
     emulator::memory::Memory,
-    instruction::{RV32IMCycle, RV32IMInstruction, VirtualInstructionSequence}, LazyTraceIterator,
+    instruction::{RV32IMCycle, RV32IMInstruction, VirtualInstructionSequence},
+    LazyTraceIterator,
 };
 
 use crate::field::JoltField;
@@ -196,7 +197,10 @@ impl Program {
 
     // TODO(moodlezoup): Make this generic over InstructionSet
     #[tracing::instrument(skip_all, name = "Program::trace")]
-    pub fn trace(&mut self, inputs: &[u8]) -> (LazyTraceIterator, Vec<RV32IMCycle>, Memory, JoltDevice) {
+    pub fn trace(
+        &mut self,
+        inputs: &[u8],
+    ) -> (LazyTraceIterator, Vec<RV32IMCycle>, Memory, JoltDevice) {
         self.build(DEFAULT_TARGET_DIR);
         let elf = self.elf.as_ref().unwrap();
         let mut elf_file =

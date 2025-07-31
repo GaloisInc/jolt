@@ -431,11 +431,8 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
                     .collect()
         });
 
-        let commitments: Vec<_> = pcss
-            .into_iter()
-            .map(|pcs| PCS::finalize(pcs))
-            .collect();
-        
+        let commitments: Vec<_> = pcss.into_iter().map(|pcs| PCS::finalize(pcs)).collect();
+
         #[cfg(test)]
         {
             let committed_polys: Vec<_> = ALL_COMMITTED_POLYNOMIALS
@@ -451,9 +448,7 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
             assert_eq!(commitments, commitments_non_streaming);
         }
 
-        let jolt_commitments = JoltCommitments {
-            commitments,
-        };
+        let jolt_commitments = JoltCommitments { commitments };
         self.prover_state_manager.set_commitments(jolt_commitments);
 
         // drop_in_background_thread(committed_polys);
@@ -461,4 +456,3 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
         Ok(())
     }
 }
-
