@@ -105,7 +105,7 @@ mod tests {
         let mut program = host::Program::new("fibonacci-guest");
         let inputs = postcard::to_stdvec(&9u32).unwrap();
         let (bytecode, init_memory_state) = program.decode();
-        let (trace, final_memory_state, io_device) = program.trace(&inputs);
+        let (_, trace, final_memory_state, io_device) = program.trace(&inputs);
         drop(artifact_guard);
 
         let preprocessing = RV32IJoltVM::prover_preprocess(
@@ -152,7 +152,7 @@ mod tests {
         let mut program = host::Program::new("sha3-guest");
         let (bytecode, init_memory_state) = program.decode();
         let inputs = postcard::to_stdvec(&[5u8; 32]).unwrap();
-        let (trace, final_memory_state, io_device) = program.trace(&inputs);
+        let (_, trace, final_memory_state, io_device) = program.trace(&inputs);
         drop(guard);
 
         let preprocessing = RV32IJoltVM::prover_preprocess(
@@ -191,7 +191,7 @@ mod tests {
     fn memory_ops_e2e_dory() {
         let mut program = host::Program::new("memory-ops-guest");
         let (bytecode, init_memory_state) = program.decode();
-        let (trace, final_memory_state, io_device) = program.trace(&[]);
+        let (_, trace, final_memory_state, io_device) = program.trace(&[]);
 
         let preprocessing = RV32IJoltVM::prover_preprocess(
             bytecode.clone(),
@@ -231,7 +231,7 @@ mod tests {
         let mut program = host::Program::new("fibonacci-guest");
         let (bytecode, init_memory_state) = program.decode();
         let inputs = postcard::to_stdvec(&9u8).unwrap();
-        let (mut trace, final_memory_state, mut io_device) = program.trace(&inputs);
+        let (_, mut trace, final_memory_state, mut io_device) = program.trace(&inputs);
         trace.truncate(100);
         io_device.outputs[0] = 0; // change the output to 0
         drop(artifact_guard);
@@ -264,7 +264,7 @@ mod tests {
         let mut program = host::Program::new("fibonacci-guest");
         let inputs = postcard::to_stdvec(&1u8).unwrap();
         let (bytecode, init_memory_state) = program.decode();
-        let (trace, final_memory_state, mut io_device) = program.trace(&inputs);
+        let (_, trace, final_memory_state, mut io_device) = program.trace(&inputs);
         let memory_layout = io_device.memory_layout.clone();
         drop(artifact_guard);
 
