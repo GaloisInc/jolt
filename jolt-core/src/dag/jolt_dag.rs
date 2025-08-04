@@ -429,11 +429,6 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
         let size = _trace.len(); // Remove this from the trait??? Or get from preprocessing?
         let trace = lazy_trace.clone();
 
-        let hints: Vec<PCS::OpeningProofHint> = todo!("Compute hints in a streaming manner");
-        let mut hint_map = HashMap::with_capacity(AllCommittedPolynomials::len());
-        for (poly, hint) in AllCommittedPolynomials::iter().zip(hints) {
-            hint_map.insert(*poly, hint);
-        }
 
         let init_pcss: Vec<_> = AllCommittedPolynomials::iter()
             .map(|_poly| PCS::initialize(size, &preprocessing.generators))
@@ -459,7 +454,13 @@ impl<'a, F: JoltField, ProofTranscript: Transcript, PCS: StreamingCommitmentSche
                     .collect()
         });
 
-        let commitments: Vec<_> = pcss.into_iter().map(|pcs| PCS::finalize(pcs)).collect();
+        let (commitments, hints): (Vec<_>, Vec<PCS::OpeningProofHint>) = pcss.into_iter().map(|pcs| PCS::finalize(pcs)).unzip();//.collect();
+        // let hints: Vec<PCS::OpeningProofHint> = todo!("Compute hints in a streaming manner");
+        let mut hint_map = HashMap::with_capacity(AllCommittedPolynomials::len());
+        for (poly, hint) in AllCommittedPolynomials::iter().zip(hints) {
+            hint_map.insert(*poly, hint);
+        }
+
 
         #[cfg(test)]
         {

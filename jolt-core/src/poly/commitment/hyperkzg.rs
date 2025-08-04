@@ -549,8 +549,8 @@ where
         state
     }
 
-    fn finalize<'a>(state: Self::State<'a>) -> Self::Commitment {
-        HyperKZGCommitment(state.acc.into())
+    fn finalize<'a>(state: Self::State<'a>) -> (Self::Commitment, Self::OpeningProofHint) {
+        (HyperKZGCommitment(state.acc.into()), ())
     }
 }
 
