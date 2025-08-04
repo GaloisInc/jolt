@@ -1,7 +1,10 @@
 use crate::{
-    poly::{one_hot_polynomial::OneHotPolynomial, rlc_polynomial::RLCPolynomial},
+    poly::{compact_polynomial::StreamingCompactPolynomial, dense_mlpoly::StreamingDensePolynomial, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotPolynomial}, rlc_polynomial::{RLCPolynomial, StreamingRLCPolynomial}},
     utils::compute_dotproduct,
 };
+    // poly::{compact_polynomial::StreamingCompactPolynomial, dense_mlpoly::StreamingDensePolynomial, one_hot_polynomial::{OneHotPolynomial, StreamingOneHotPolynomial}, rlc_polynomial::{RLCPolynomial, StreamingRLCPolynomial}},
+    // utils::{compute_dotproduct, math::Math},
+
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Valid};
 use num_traits::MulAdd;
 use rayon::prelude::*;
@@ -59,6 +62,20 @@ impl<F: JoltField> CanonicalSerialize for MultilinearPolynomial<F> {
     fn serialized_size(&self, _compress: ark_serialize::Compress) -> usize {
         unimplemented!("Only here to satisfy trait bounds")
     }
+}
+
+/// Wrapper enum for the various streaming polynomial types used in Jolt
+#[repr(u8)]
+#[derive(Clone, Debug, EnumIter, PartialEq)]
+pub enum StreamingPolynomial<F: JoltField> {
+    LargeScalars(StreamingDensePolynomial<F>),
+    U8Scalars(StreamingCompactPolynomial<u8, F>),
+    U16Scalars(StreamingCompactPolynomial<u16, F>),
+    U32Scalars(StreamingCompactPolynomial<u32, F>),
+    U64Scalars(StreamingCompactPolynomial<u64, F>),
+    I64Scalars(StreamingCompactPolynomial<i64, F>),
+    RLC(StreamingRLCPolynomial<F>),
+    OneHot(StreamingOneHotPolynomial<F>),
 }
 
 /// The order in which polynomial variables are bound in sumcheck

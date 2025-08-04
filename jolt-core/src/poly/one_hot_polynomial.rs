@@ -21,6 +21,11 @@ use rayon::prelude::*;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StreamingOneHotPolynomial<F: JoltField> {
+    phantom: std::marker::PhantomData<fn(F)>,
+}
+
 /// Represents a one-hot multilinear polynomial (ra/wa) used
 /// in Twist/Shout. Perhaps somewhat unintuitively, the implementation
 /// in this file is currently only used to compute the Dory
