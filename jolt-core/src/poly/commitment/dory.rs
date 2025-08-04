@@ -2,15 +2,11 @@
 
 use super::commitment_scheme::{CommitmentScheme, StreamingCommitmentScheme};
 use crate::{
-    field::JoltField,
-    msm::VariableBaseMSM,
-    poly::compact_polynomial::SmallScalar,
-    poly::multilinear_polynomial::MultilinearPolynomial,
-    utils::{
+    field::JoltField, jolt::vm::instruction_lookups::D, msm::VariableBaseMSM, poly::{compact_polynomial::SmallScalar, multilinear_polynomial::MultilinearPolynomial}, utils::{
         errors::ProofVerifyError,
         math::Math,
         transcript::{AppendToTranscript, Transcript},
-    },
+    }
 };
 use ark_bn254::{Bn254, Fr, G1Projective, G2Projective};
 use ark_ec::{
@@ -1254,8 +1250,10 @@ impl StreamingCommitmentScheme for DoryCommitmentScheme {
         state.process::<JoltMsmG1>(JoltFieldWrapper(eval))
     }
 
-    fn finalize<'a>(state: Self::State<'a>) -> Self::Commitment {
-        DoryCommitment(state.finalize::<JoltMsmG1>())
+    fn finalize<'a>(state: Self::State<'a>) -> (Self::Commitment, Self::OpeningProofHint) {
+        let (commitment, hint) = state.finalize::<JoltMsmG1>();
+        (DoryCommitment(commitment), hint)
+        // DoryCommitment(state.finalize::<JoltMsmG1>())
     }
 }
 

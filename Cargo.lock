@@ -1086,10 +1086,14 @@ dependencies = [
 name = "dory"
 version = "1.0.0"
 <<<<<<< HEAD
+<<<<<<< HEAD
 source = "git+https://github.com/spaceandtimefdn/sxt-dory?branch=feat%2Freturn_row_commitments#b22b6f08fdda11150e5826ee1cba0f6d12f977f7"
 =======
 source = "git+https://github.com/GaloisInc/sxt-dory?branch=feat%2Fstreaming#75ba8272b006b9bfad8c3a256e022ae7c0a581e4"
 >>>>>>> 2a8e328f (replaced the stubs with streaming dory implementation.)
+=======
+source = "git+https://github.com/GaloisInc/sxt-dory?branch=feat%2Fstreaming_take_2#f2147aba32f495fb2b8659c17717eba2ff805ecf"
+>>>>>>> 78d4e47d (updated to be consistent with PCS hints.)
 dependencies = [
  "ark-bn254",
  "ark-ec",
