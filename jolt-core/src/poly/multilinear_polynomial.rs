@@ -67,7 +67,7 @@ impl<F: JoltField> CanonicalSerialize for MultilinearPolynomial<F> {
 /// Wrapper enum for the various streaming polynomial types used in Jolt
 #[repr(u8)]
 // #[derive(Clone, Debug, EnumIter)]
-pub enum StreamingPolynomial<F: JoltField> {
+pub enum StreamingPolynomial<'a, F: JoltField> {
     LargeScalars(StreamingDensePolynomial<F>),
     U8Scalars(StreamingCompactPolynomial<u8, F>),
     U16Scalars(StreamingCompactPolynomial<u16, F>),
@@ -75,7 +75,7 @@ pub enum StreamingPolynomial<F: JoltField> {
     U64Scalars(StreamingCompactPolynomial<u64, F>),
     I64Scalars(StreamingCompactPolynomial<i64, F>),
     RLC(StreamingRLCPolynomial<F>),
-    OneHot(StreamingOneHotPolynomial<F>),
+    OneHot(StreamingOneHotPolynomial<'a, F>),
 }
 
 /// The order in which polynomial variables are bound in sumcheck
