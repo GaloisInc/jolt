@@ -1,5 +1,5 @@
 [toolchain]
-channel = "1.88"
+channel = "nightly"
 targets = ["riscv32im-unknown-none-elf"]
 profile    = "minimal"
 components = ["cargo", "rustc", "clippy", "rustfmt"]
