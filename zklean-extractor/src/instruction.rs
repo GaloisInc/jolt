@@ -60,11 +60,11 @@ impl<J: JoltParameterSet> ZkLeanInstruction<J> {
         mut indent_level: usize,
     ) -> std::io::Result<()> {
         let name = self.name();
-        let word_size = J::WORD_SIZE;
+        let reg_size = 2 * J::WORD_SIZE;
         self.evaluate_mle::<F>('x')
             .map_or(Ok(()), |mle| {
                 f.write_fmt(format_args!(
-                        "{}def {name} [Field f] : Subtable f {word_size} :=\n",
+                        "{}def {name} [Field f] : Subtable f {reg_size} :=\n",
                         indent(indent_level),
                 ))?;
                 indent_level += 1;
