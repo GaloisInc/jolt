@@ -2,24 +2,26 @@
 //!
 //! Encoding: 0x30200073 (SYSTEM opcode, funct3=000, imm=0x302)
 //!
-//! For ZeroOS M-mode-only operation:
-//! - Reads mepc (from virtual register vr36) and sets PC to that value
-//! - In full RISC-V, MRET also restores privilege mode from mstatus.MPP
-//!   and sets mstatus.MIE from mstatus.MPIE, but for single-privilege
-//!   M-mode-only execution, these bits don't need to change.
+//! # Privilege model
+//!
+//! Jolt targets M-mode-only execution with no interrupt hardware. MRET is
+//! implemented as a single JALR to mepc — it does not modify mstatus.
+//!
+//! The full RISC-V spec requires MRET to restore MIE from MPIE, set MPIE=1,
+//! and reset MPP to the least-privileged mode. These operations are omitted
+//! because:
+//! - There is only one privilege level (Machine) — MPP is always 3.
+//! - No interrupt sources exist and the MIE CSR (0x304) is inaccessible,
+//!   so MIE/MPIE bits are unused.
+//! - The ZeroOS trap trampoline restores mstatus via `csrw mstatus, <saved>`
+//!   before executing `mret`, so the virtual register holds the correct value
+//!   without MRET needing to manipulate it.
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    declare_riscv_instr,
-    emulator::cpu::{Cpu, Xlen},
-    utils::inline_helpers::InstrAssembler,
-    utils::virtual_registers::VirtualRegisterAllocator,
-};
+use crate::{declare_riscv_instr, emulator::cpu::Cpu};
 
-use super::{
-    format::format_i::FormatI, jalr::JALR, Cycle, Instruction, RISCVInstruction, RISCVTrace,
-};
+use super::{format::format_i::FormatI, Cycle, Instruction, RISCVInstruction, RISCVTrace};
 
 declare_riscv_instr!(
     name   = MRET,
@@ -38,14 +40,8 @@ impl MRET {
         let mepc = cpu.read_csr_raw(CSR_MEPC_ADDRESS);
         cpu.pc = mepc;
 
-        // In a full implementation, we would also:
-        // 1. Set privilege mode to mstatus.MPP
-        // 2. Set mstatus.MIE to mstatus.MPIE
-        // 3. Set mstatus.MPP to U-mode (or M-mode if only M-mode is supported)
-        // 4. Set mstatus.MPIE to 1
-        //
-        // For ZeroOS M-mode-only, single-core, no-interrupt use case,
-        // privilege mode stays M and interrupt enable bits don't matter.
+        // mstatus is not modified — see module-level docs for why this is
+        // correct in the M-mode-only model.
     }
 }
 
@@ -56,34 +52,7 @@ impl RISCVTrace for MRET {
 
         // Generate and execute inline sequence
         // The inline sequence reads mepc from virtual register (source of truth for proofs)
-        let inline_sequence = self.inline_sequence(&cpu.vr_allocator, cpu.xlen);
-
-        let mut trace = trace;
-        for instr in inline_sequence {
-            instr.trace(cpu, trace.as_deref_mut());
-        }
-    }
-
-    /// Generate inline sequence for MRET.
-    ///
-    /// MRET jumps to mepc. The mepc virtual register (vr36) must have been written
-    /// by a prior CSRRW instruction (typically in the trap handler before MRET).
-    ///
-    /// Layout:
-    ///   0: JALR(x0, vr36, 0) - Jump to mepc (read directly from virtual register)
-    fn inline_sequence(
-        &self,
-        allocator: &VirtualRegisterAllocator,
-        xlen: Xlen,
-    ) -> Vec<Instruction> {
-        let mepc_vr = allocator.mepc_register();
-
-        let mut asm = InstrAssembler::new(self.address, self.is_compressed, xlen, allocator);
-
-        // Index 0: Jump to mepc (read directly from virtual register)
-        asm.emit_i::<JALR>(0, mepc_vr, 0);
-
-        asm.finalize()
+        super::trace_inline_sequence(&Instruction::from(*self), cpu, trace);
     }
 }
 

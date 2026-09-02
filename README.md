@@ -54,7 +54,7 @@ For developers looking to contribute to Jolt, follow the instructions below.
 
 ## Installation
 
-You will need Rust [nightly](./rust-toolchain.toml).
+You will need the Rust toolchain pinned in [rust-toolchain.toml](./rust-toolchain.toml).
 
 If you have `rustup` installed, you do not need to do anything as it will
 automatically install the correct toolchain and any additional targets on the
@@ -77,17 +77,17 @@ Install the Jolt CLI:
 
 This repository uses workspaces, and each workspace can be built individually, e.g.
 
-```cargo build -p jolt-core```
+```cargo build -p jolt-prover-legacy```
 
 For faster incremental builds, use the `build-fast` profile:
 
-```cargo build --profile build-fast -p jolt-core```
+```cargo build --profile build-fast -p jolt-prover-legacy```
 
 ## Test
 
-Unit and end-to-end tests for `jolt-core` can be run using the following command:
+Unit and end-to-end tests for `jolt-prover-legacy` can be run using the following command:
 
-```cargo test -p jolt-core```
+```cargo nextest run -p jolt-prover-legacy --features host```
 
 Examples in the [`examples`](./examples/) directory can be run using e.g.
 
@@ -101,37 +101,37 @@ Jolt is instrumented using [tokio-rs/tracing](https://github.com/tokio-rs/tracin
 
 To generate a trace, run e.g.
 
-```cargo run --release -p jolt-core profile --name sha3 --format chrome```
+```cargo run --release -p jolt-prover-legacy profile --name sha3 --format chrome```
 
-Where `--name` can be `sha2`, `sha3`, `sha2-chain`, `fibonacci`, or `btreemap`. The corresponding guest programs can be found in the [`examples`](./examples/) directory. The benchmark inputs are provided in [`bench.rs`](./jolt-core/src/benches/bench.rs).
+Where `--name` can be `sha2`, `sha3`, `sha2-chain`, `sha3-chain`, `fibonacci`, or `btreemap`. The corresponding guest programs can be found in the [`examples`](./examples/) directory. The benchmark inputs are provided in [`e2e_profiling.rs`](./crates/jolt-prover-legacy/benches/e2e_profiling.rs).
 
 The above command will output a JSON file in the workspace rootwith a name `trace-<timestamp>.json`, which can be viewed in [Perfetto](https://ui.perfetto.dev/).
 
 To easily see CPU and memory usage in the trace, you can use `--features monitor` which will log these metrics as tracing events:
 
 ```bash
-cargo run --release --features monitor -p jolt-core profile --name sha3 --format chrome
+cargo run --release --features monitor -p jolt-prover-legacy profile --name sha3 --format chrome
 # Converts counter events into Perfetto counter tracks for easier visualization
 python3 scripts/postprocess_trace.py benchmark-runs/perfetto_traces/*.json
 ```
 
 You may also enable pprof for detailed CPU profiling:
 
-```cargo run --release --features pprof -p jolt-core profile --name sha3 --format chrome```
+```cargo run --release --features pprof -p jolt-prover-legacy profile --name sha3 --format chrome```
 
 This will produce a `.pb` profile, which you can view in [pprof](https://github.com/google/pprof):
 
-```go tool pprof -http=:8080 target/release/jolt-core benchmark-runs/pprof/sha3_prove.pb```
+```go tool pprof -http=:8080 target/release/jolt-prover-legacy benchmark-runs/pprof/sha3_prove.pb```
 
 ### Memory profiling
 
 Jolt uses [allocative](https://github.com/facebookexperimental/allocative) for memory profiling.
 Allocative allows you to (recursively) measure the total heap space occupied by a data structure implementing the `Allocative` trait, and optionally generate a flamegraph.
-In Jolt, most sumcheck data structures implement the `Allocative` trait, and we generate a flamegraph at the start and end of stages 2-5 (see [`jolt_dag.rs`](https://github.com/a16z/jolt/blob/main/jolt-core/src/zkvm/dag/jolt_dag.rs)).
+In Jolt, most sumcheck data structures implement the `Allocative` trait, and we generate a flamegraph at the start and end of stages 2-7 (see [`prover.rs`](./crates/jolt-prover-legacy/src/zkvm/prover.rs)).
 
 To generate allocative output, run:
 
-```RUST_LOG=debug cargo run --release --features allocative -p jolt-core profile --name sha3 --format chrome```
+```RUST_LOG=debug cargo run --release --features allocative -p jolt-prover-legacy profile --name sha3 --format chrome```
 
 Where, as above, `--name` can be `sha2`, `sha3`, `sha2-chain`, `fibonacci`, or `btreemap`.
 
@@ -145,19 +145,53 @@ However, it supports backtraces for panics that happen in guest programs.
 By default, symbols are stripped from release guest ELFs and backtraces won't have much information.
 Debug/dev builds preserve symbols automatically.
 
-To enable symbolized backtraces, set the `JOLT_BACKTRACE` environment variable to `1` or `full`:
+#### Backtrace flags
 
-```
-JOLT_BACKTRACE=1 cargo run --release -p example
-```
+There are two ways to enable backtrace support, depending on your workflow:
 
-When `JOLT_BACKTRACE=full` is set, the backtraces include cycle counts and non-zero values of registers at each frame.
+- **`JOLT_BACKTRACE=1`** — ad-hoc debugging; set it in your shell and the guest
+  auto-rebuilds with symbols preserved. The call stack is always captured; this
+  just enables symbol resolution (function names, file:line). Use
+  `JOLT_BACKTRACE=full` for register snapshots + cycle counts per frame.
+
+  ```bash
+  JOLT_BACKTRACE=1 cargo run --release -p example
+  JOLT_BACKTRACE=full cargo run --release -p example
+  ```
+
+- **`backtrace = "dwarf"` in `#[jolt::provable]`** — bakes symbol preservation +
+  `-Cforce-frame-pointers=yes` into the build. Use this for guests where you
+  always want full debug support (test programs, dedicated debug builds), or when
+  you need frame pointers for ZeroOS-level unwinding / external tooling. Not
+  needed for normal debugging — `JOLT_BACKTRACE=1` is sufficient for most cases.
+
+  ```rust
+  #[jolt::provable(backtrace = "dwarf")]
+  fn my_function(input: u64) -> u64 { ... }
+  ```
+
+  Valid values: `"off"`, `"dwarf"`, `"frame-pointers"`.
 
 You can also control symbol preservation directly via `jolt build --backtrace enable`.
+
+#### Printing and tracing
 
 To further assist in debugging, Jolt supports `print!` and `println!` macros in guest programs. For `no_std` guests, import the macros via `use jolt::println;`. When std is enabled, the standard `println!` works automatically.
 
 When debugging issues with guest programs, it's recommended to use the corresponding `trace_analyze` for your `#[jolt::provable]` functions. This skips instantiating the prover and allows for faster iteration.
+
+## AI Coding Skill
+
+Jolt ships an [agent skill](https://vercel.com/docs/agent-resources/skills) that teaches AI coding agents (Claude Code, Cursor, Codex, etc.) how to wrap Rust functions in Jolt zero-knowledge proofs.
+
+```bash
+npx skills add a16z/jolt
+```
+
+Fallback (Claude Code / Codex):
+```bash
+curl -sfL jolt.rs/skill | bash
+```
 
 ## CI Benchmarking
 

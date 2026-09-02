@@ -3,7 +3,8 @@ use std::panic;
 
 use crate::emulator::cpu::Cpu;
 use crate::instruction::format::{InstructionFormat, InstructionRegisterState};
-use crate::instruction::NormalizedInstruction;
+#[cfg(test)]
+use jolt_riscv::RV64IMAC_JOLT;
 
 #[cfg(test)]
 use super::{
@@ -18,7 +19,7 @@ use super::{
     subw::SUBW, sw::SW,
 };
 
-use super::{RISCVInstruction, RISCVTrace};
+use super::{Instruction, RISCVInstruction, RISCVTrace};
 
 use crate::emulator::terminal::DummyTerminal;
 
@@ -56,6 +57,49 @@ fn test_rng() -> StdRng {
     StdRng::from_seed(seed)
 }
 
+#[test]
+fn jolt_program_rv64_decode_matches_tracer_normalization() {
+    use crate::instruction::{uncompress_instruction, Instruction};
+
+    let address = DRAM_BASE;
+    let cases = [
+        (0x1234_50b7, false),
+        (0x1234_5097, false),
+        (0x0080_00ef, false),
+        (0x0000_80e7, false),
+        (0x0020_8063, false),
+        (0x0000_b183, false),
+        (0x0030_b023, false),
+        (0xfff1_0093, false),
+        (0x0010_809b, false),
+        (0x0020_81b3, false),
+        (0x0220_81b3, false),
+        (0x0020_81bb, false),
+        (0x0000_000f, false),
+        (0x0000_0073, false),
+        (0x0010_0073, false),
+        (0x3020_0073, false),
+        (0x3001_10f3, false),
+        (0x0000_10db, false),
+        (0x0020_802b, false),
+        (uncompress_instruction(0x107a), true),
+    ];
+
+    for (word, compressed) in cases {
+        let expected = Instruction::decode(word, address, compressed)
+            .unwrap()
+            .source_instruction();
+        let actual = jolt_program::image::decode::decode_instruction(
+            word,
+            address,
+            compressed,
+            RV64IMAC_JOLT,
+        )
+        .unwrap();
+        assert_eq!(actual, expected, "word={word:08x} compressed={compressed}");
+    }
+}
+
 pub fn inline_sequence_trace_test<I: RISCVInstruction + RISCVTrace + Copy>()
 where
     Cycle: From<RISCVCycle<I>>,
@@ -65,11 +109,12 @@ where
 
     for _ in 0..1000 {
         let instruction = I::random(&mut rng);
-        let instr: NormalizedInstruction = instruction.into();
+        let concrete: Instruction = instruction.into();
+        let source = concrete.source_instruction();
         let register_state =
             <<I::Format as InstructionFormat>::RegisterState as InstructionRegisterState>::random(
                 &mut rng,
-                &instr.operands,
+                &source.row().operands,
             );
 
         let mut original_cpu = Cpu::new(Box::new(DummyTerminal::default()));
@@ -106,19 +151,15 @@ where
             }
         }
 
-        let rs1 = instr.operands.rs1.unwrap_or(0) as usize;
-        if rs1 != 0 {
-            if let Some(rs1_val) = register_state.rs1_value() {
-                original_cpu.x[rs1] = rs1_val as i64;
-                virtual_cpu.x[rs1] = rs1_val as i64;
-            }
+        let rs1 = source.row().operands.rs1.unwrap_or(0) as usize;
+        if let Some(rs1_val) = register_state.rs1_value() {
+            original_cpu.write_register(rs1, rs1_val as i64);
+            virtual_cpu.write_register(rs1, rs1_val as i64);
         }
-        let rs2 = instr.operands.rs2.unwrap_or(0) as usize;
-        if rs2 != 0 {
-            if let Some(rs2_val) = register_state.rs2_value() {
-                original_cpu.x[rs2] = rs2_val as i64;
-                virtual_cpu.x[rs2] = rs2_val as i64;
-            }
+        let rs2 = source.row().operands.rs2.unwrap_or(0) as usize;
+        if let Some(rs2_val) = register_state.rs2_value() {
+            original_cpu.write_register(rs2, rs2_val as i64);
+            virtual_cpu.write_register(rs2, rs2_val as i64);
         }
 
         let mut ram_access = Default::default();

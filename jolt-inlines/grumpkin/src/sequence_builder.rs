@@ -1,115 +1,164 @@
-use std::collections::VecDeque;
-
-use ark_ff::{BigInt, Field};
+use ark_ff::{BigInt, Field, PrimeField};
 use ark_grumpkin::{Fq, Fr};
-use tracer::{
-    emulator::cpu::Cpu,
-    instruction::{
-        format::format_inline::FormatInline, sd::SD, virtual_advice::VirtualAdvice, Instruction,
-    },
-    utils::{inline_helpers::InstrAssembler, virtual_registers::VirtualRegisterGuard},
+use jolt_inlines_sdk::host::{
+    load_field_element_limbs, ExpandedInstructionSequence, ExpansionError, FieldElementAdvice,
+    FormatInline, GlvDecompositionAdvice, InlineAdviceContext, InlineAdviceError, InlineBuilderExt,
+    InlineExpansionBuilder, InlineOp, InlineOperands, InlineRegister,
 };
 struct GrumpkinDivAdv {
-    asm: InstrAssembler,
-    vr: VirtualRegisterGuard, // only one register needed
-    operands: FormatInline,
-    is_base_field: bool, // true if base field (Fq), false if scalar field (Fr)
+    asm: InlineExpansionBuilder,
+    vr: InlineRegister, // only one register needed
+    operands: InlineOperands,
 }
 
 impl GrumpkinDivAdv {
-    fn new(asm: InstrAssembler, operands: FormatInline, is_base_field: bool) -> Self {
-        let vr = asm.allocator.allocate_for_inline();
-        GrumpkinDivAdv {
-            asm,
-            vr,
-            operands,
-            is_base_field,
-        }
+    fn new(
+        mut asm: InlineExpansionBuilder,
+        operands: InlineOperands,
+    ) -> Result<Self, ExpansionError> {
+        let vr = asm.allocate_for_inline()?;
+        Ok(GrumpkinDivAdv { asm, vr, operands })
     }
-    // Custom advice function
-    fn advice(self, cpu: &mut Cpu) -> VecDeque<u64> {
-        // read memory directly to get inputs
-        let a_addr = cpu.x[self.operands.rs1 as usize] as u64;
-        let a = [
-            cpu.mmu.load_doubleword(a_addr).unwrap().0,
-            cpu.mmu.load_doubleword(a_addr + 8).unwrap().0,
-            cpu.mmu.load_doubleword(a_addr + 16).unwrap().0,
-            cpu.mmu.load_doubleword(a_addr + 24).unwrap().0,
-        ];
-        let b_addr = cpu.x[self.operands.rs2 as usize] as u64;
-        let b = [
-            cpu.mmu.load_doubleword(b_addr).unwrap().0,
-            cpu.mmu.load_doubleword(b_addr + 8).unwrap().0,
-            cpu.mmu.load_doubleword(b_addr + 16).unwrap().0,
-            cpu.mmu.load_doubleword(b_addr + 24).unwrap().0,
-        ];
-        // compute c = a / b and return limbs as VecDeque
-        VecDeque::from(
-            if self.is_base_field {
-                let arr_to_fq = |a: &[u64; 4]| Fq::new_unchecked(BigInt(*a));
-                (arr_to_fq(&b)
-                    .inverse()
-                    .expect("Attempted to invert zero in grumpkin base field")
-                    * arr_to_fq(&a))
-                .0
-            } else {
-                let arr_to_fr = |a: &[u64; 4]| Fr::new_unchecked(BigInt(*a));
-                (arr_to_fr(&b)
-                    .inverse()
-                    .expect("Attempted to invert zero in grumpkin scalar field")
-                    * arr_to_fr(&a))
-                .0
-            }
-            .0
-            .to_vec(),
-        )
+
+    fn advice(
+        operands: FormatInline,
+        is_base_field: bool,
+        ctx: &mut dyn InlineAdviceContext,
+    ) -> Result<FieldElementAdvice, InlineAdviceError> {
+        let a_addr = ctx.register(operands.rs1 as usize);
+        let a = load_field_element_limbs(ctx, a_addr)?;
+        let b_addr = ctx.register(operands.rs2 as usize);
+        let b = load_field_element_limbs(ctx, b_addr)?;
+        // A zero divisor has no inverse, so no advice can satisfy `b * c == a`
+        // for `a != 0`. Emit `c = 0` instead of aborting trace generation: the
+        // guest-side check in `div_assume_nonzero` then spoils the proof, which
+        // is the contract a guest calling `div` with a zero divisor expects.
+        let limbs = if is_base_field {
+            let arr_to_fq = |a: &[u64; 4]| Fq::new_unchecked(BigInt(*a));
+            arr_to_fq(&b)
+                .inverse()
+                .map_or([0u64; 4], |b_inv| (b_inv * arr_to_fq(&a)).0 .0)
+        } else {
+            let arr_to_fr = |a: &[u64; 4]| Fr::new_unchecked(BigInt(*a));
+            arr_to_fr(&b)
+                .inverse()
+                .map_or([0u64; 4], |b_inv| (b_inv * arr_to_fr(&a)).0 .0)
+        };
+        Ok(FieldElementAdvice { limbs })
     }
-    // inline sequence function
-    fn inline_sequence(mut self) -> Vec<Instruction> {
-        for i in 0..4 {
-            self.asm.emit_j::<VirtualAdvice>(*self.vr, 0);
-            self.asm
-                .emit_s::<SD>(self.operands.rs3, *self.vr, i as i64 * 8);
-        }
-        drop(self.vr);
-        self.asm.finalize_inline()
+
+    fn inline_sequence(mut self) -> Result<ExpandedInstructionSequence, ExpansionError> {
+        self.asm.emit_advice_stores(*self.vr, self.operands.rs3, 4);
+        self.asm.release(self.vr);
+        self.asm.finalize()
     }
 }
 
-/// Virtual instruction builder for unchecked grumpkin base field modular division
-pub fn grumpkin_divq_adv_sequence_builder(
-    asm: InstrAssembler,
-    operands: FormatInline,
-) -> Vec<Instruction> {
-    let builder = GrumpkinDivAdv::new(asm, operands, true);
-    builder.inline_sequence()
+struct GlvrAdvBuilder {
+    asm: InlineExpansionBuilder,
+    vr: InlineRegister,
+    operands: InlineOperands,
 }
 
-/// Custom trace function for unchecked grumpkin base field modular division
-pub fn grumpkin_divq_adv_advice(
-    asm: InstrAssembler,
-    operands: FormatInline,
-    cpu: &mut Cpu,
-) -> VecDeque<u64> {
-    let builder = GrumpkinDivAdv::new(asm, operands, true);
-    builder.advice(cpu)
+impl GlvrAdvBuilder {
+    fn new(
+        mut asm: InlineExpansionBuilder,
+        operands: InlineOperands,
+    ) -> Result<Self, ExpansionError> {
+        let vr = asm.allocate_for_inline()?;
+        Ok(GlvrAdvBuilder { asm, vr, operands })
+    }
+
+    fn advice(
+        operands: FormatInline,
+        ctx: &mut dyn InlineAdviceContext,
+    ) -> Result<GlvDecompositionAdvice, InlineAdviceError> {
+        let k_addr = ctx.register(operands.rs1 as usize);
+        let k_limbs = load_field_element_limbs(ctx, k_addr)?;
+        let k = Fr::new_unchecked(BigInt(k_limbs)).into_bigint().into();
+        Ok(GlvDecompositionAdvice::from_sign_abs(
+            crate::glv::decompose_scalar(k),
+        ))
+    }
+
+    fn inline_sequence(mut self) -> Result<ExpandedInstructionSequence, ExpansionError> {
+        self.asm.emit_advice_stores(*self.vr, self.operands.rs3, 6);
+        self.asm.release(self.vr);
+        self.asm.finalize()
+    }
 }
 
-/// Virtual instruction builder for unchecked grumpkin scalar field modular division
-pub fn grumpkin_divr_adv_sequence_builder(
-    asm: InstrAssembler,
-    operands: FormatInline,
-) -> Vec<Instruction> {
-    let builder = GrumpkinDivAdv::new(asm, operands, false);
-    builder.inline_sequence()
+pub struct GrumpkinDivQAdv;
+
+impl InlineOp for GrumpkinDivQAdv {
+    type Advice = FieldElementAdvice;
+
+    const OPCODE: u32 = crate::INLINE_OPCODE;
+    const FUNCT3: u32 = crate::GRUMPKIN_DIVQ_ADV_FUNCT3;
+    const FUNCT7: u32 = crate::GRUMPKIN_FUNCT7;
+    const NAME: &'static str = crate::GRUMPKIN_DIVQ_ADV_NAME;
+
+    fn build_sequence(
+        asm: InlineExpansionBuilder,
+        operands: InlineOperands,
+    ) -> Result<ExpandedInstructionSequence, ExpansionError> {
+        GrumpkinDivAdv::new(asm, operands)?.inline_sequence()
+    }
+
+    fn build_advice(
+        operands: FormatInline,
+        ctx: &mut dyn InlineAdviceContext,
+    ) -> Result<Self::Advice, InlineAdviceError> {
+        GrumpkinDivAdv::advice(operands, true, ctx)
+    }
 }
 
-/// Custom trace function for unchecked grumpkin scalar field modular division
-pub fn grumpkin_divr_adv_advice(
-    asm: InstrAssembler,
-    operands: FormatInline,
-    cpu: &mut Cpu,
-) -> VecDeque<u64> {
-    let builder = GrumpkinDivAdv::new(asm, operands, false);
-    builder.advice(cpu)
+pub struct GrumpkinDivRAdv;
+
+impl InlineOp for GrumpkinDivRAdv {
+    type Advice = FieldElementAdvice;
+
+    const OPCODE: u32 = crate::INLINE_OPCODE;
+    const FUNCT3: u32 = crate::GRUMPKIN_DIVR_ADV_FUNCT3;
+    const FUNCT7: u32 = crate::GRUMPKIN_FUNCT7;
+    const NAME: &'static str = crate::GRUMPKIN_DIVR_ADV_NAME;
+
+    fn build_sequence(
+        asm: InlineExpansionBuilder,
+        operands: InlineOperands,
+    ) -> Result<ExpandedInstructionSequence, ExpansionError> {
+        GrumpkinDivAdv::new(asm, operands)?.inline_sequence()
+    }
+
+    fn build_advice(
+        operands: FormatInline,
+        ctx: &mut dyn InlineAdviceContext,
+    ) -> Result<Self::Advice, InlineAdviceError> {
+        GrumpkinDivAdv::advice(operands, false, ctx)
+    }
+}
+
+pub struct GrumpkinGlvrAdv;
+
+impl InlineOp for GrumpkinGlvrAdv {
+    type Advice = GlvDecompositionAdvice;
+
+    const OPCODE: u32 = crate::INLINE_OPCODE;
+    const FUNCT3: u32 = crate::GRUMPKIN_GLVR_ADV_FUNCT3;
+    const FUNCT7: u32 = crate::GRUMPKIN_FUNCT7;
+    const NAME: &'static str = crate::GRUMPKIN_GLVR_ADV_NAME;
+
+    fn build_sequence(
+        asm: InlineExpansionBuilder,
+        operands: InlineOperands,
+    ) -> Result<ExpandedInstructionSequence, ExpansionError> {
+        GlvrAdvBuilder::new(asm, operands)?.inline_sequence()
+    }
+
+    fn build_advice(
+        operands: FormatInline,
+        ctx: &mut dyn InlineAdviceContext,
+    ) -> Result<Self::Advice, InlineAdviceError> {
+        GlvrAdvBuilder::advice(operands, ctx)
+    }
 }

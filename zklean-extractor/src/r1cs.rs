@@ -1,4 +1,4 @@
-use jolt_core::zkvm::r1cs::{
+use jolt_prover_legacy::zkvm::r1cs::{
     constraints::{NamedR1CSConstraint, R1CSConstraint, R1CS_CONSTRAINTS},
     inputs::{JoltR1CSInputs, ALL_R1CS_INPUTS},
     ops::{Term, LC},
@@ -132,7 +132,7 @@ impl<J: JoltParameterSet> ZkLeanR1CSConstraints<J> {
     }
 
     pub fn zklean_imports(&self) -> Vec<String> {
-        vec![String::from("ZkLean")]
+        vec![String::from("zkLean")]
     }
 }
 

@@ -1,4 +1,6 @@
+#[cfg(feature = "std")]
 use allocative::Allocative;
+#[cfg(feature = "std")]
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -13,21 +15,39 @@ use crate::constants::{
     RAM_START_ADDRESS, STACK_CANARY_SIZE,
 };
 
-#[allow(clippy::too_long_first_doc_paragraph)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryLayoutError {
+    ZeroAddress,
+    AddressBelowLowest { address: u64, lowest_address: u64 },
+}
+
+impl core::fmt::Display for MemoryLayoutError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ZeroAddress => write!(f, "cannot remap the zero address"),
+            Self::AddressBelowLowest {
+                address,
+                lowest_address,
+            } => write!(
+                f,
+                "address {address} is below lowest mapped address {lowest_address}"
+            ),
+        }
+    }
+}
+
+#[expect(
+    clippy::too_long_first_doc_paragraph,
+    reason = "pre-existing doc paragraph exceeds the pedantic limit"
+)]
 /// Represented as a "peripheral device" in the RISC-V emulator, this captures
 /// all reads from the reserved memory address space for program inputs and all writes
 /// to the reserved memory address space for program outputs.
 /// The inputs and outputs are part of the public inputs to the proof.
-#[derive(
-    Allocative,
-    Default,
-    Debug,
-    Clone,
-    PartialEq,
-    Serialize,
-    Deserialize,
-    CanonicalSerialize,
-    CanonicalDeserialize,
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "std",
+    derive(Allocative, CanonicalSerialize, CanonicalDeserialize)
 )]
 pub struct JoltDevice {
     pub inputs: Vec<u8>,
@@ -57,32 +77,22 @@ impl JoltDevice {
             0 // Termination bit should never be loaded after it is set
         } else if self.is_input(address) {
             let internal_address = self.convert_read_address(address);
-            if self.inputs.len() <= internal_address {
-                0
-            } else {
-                self.inputs[internal_address]
-            }
+            self.inputs.get(internal_address).copied().unwrap_or(0)
         } else if self.is_trusted_advice(address) {
             let internal_address = self.convert_trusted_advice_read_address(address);
-            if self.trusted_advice.len() <= internal_address {
-                0
-            } else {
-                self.trusted_advice[internal_address]
-            }
+            self.trusted_advice
+                .get(internal_address)
+                .copied()
+                .unwrap_or(0)
         } else if self.is_untrusted_advice(address) {
             let internal_address = self.convert_untrusted_advice_read_address(address);
-            if self.untrusted_advice.len() <= internal_address {
-                0
-            } else {
-                self.untrusted_advice[internal_address]
-            }
+            self.untrusted_advice
+                .get(internal_address)
+                .copied()
+                .unwrap_or(0)
         } else if self.is_output(address) {
             let internal_address = self.convert_write_address(address);
-            if self.outputs.len() <= internal_address {
-                0
-            } else {
-                self.outputs[internal_address]
-            }
+            self.outputs.get(internal_address).copied().unwrap_or(0)
         } else {
             assert!(address <= RAM_START_ADDRESS - 8);
             0 // zero-padding
@@ -98,10 +108,24 @@ impl JoltDevice {
         }
 
         let internal_address = self.convert_write_address(address);
+        let max_output_size =
+            (self.memory_layout.output_end - self.memory_layout.output_start) as usize;
+        assert!(
+            internal_address < max_output_size,
+            "Output too long: guest wrote {} bytes, max is {} bytes (set by MemoryConfig.max_output_size).",
+            internal_address + 1,
+            max_output_size,
+        );
         if self.outputs.len() <= internal_address {
             self.outputs.resize(internal_address + 1, 0);
         }
-        self.outputs[internal_address] = value;
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "the resize above guarantees internal_address < outputs.len()"
+        )]
+        {
+            self.outputs[internal_address] = value;
+        }
     }
 
     pub fn size(&self) -> usize {
@@ -149,6 +173,27 @@ impl JoltDevice {
     fn convert_write_address(&self, address: u64) -> usize {
         (address - self.memory_layout.output_start) as usize
     }
+
+    pub fn input_words_le(&self) -> Vec<u64> {
+        bytes_to_words_le(&self.inputs)
+    }
+
+    pub fn output_words_le(&self) -> Vec<u64> {
+        bytes_to_words_le(&self.outputs)
+    }
+}
+
+pub fn bytes_to_words_le(bytes: &[u8]) -> Vec<u64> {
+    bytes
+        .chunks(8)
+        .map(|chunk| {
+            let mut value = 0u64;
+            for (index, byte) in chunk.iter().enumerate() {
+                value |= u64::from(*byte) << (8 * index);
+            }
+            value
+        })
+        .collect()
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -176,15 +221,10 @@ impl Default for MemoryConfig {
     }
 }
 
-#[derive(
-    Allocative,
-    Default,
-    Clone,
-    PartialEq,
-    Serialize,
-    Deserialize,
-    CanonicalSerialize,
-    CanonicalDeserialize,
+#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "std",
+    derive(Allocative, CanonicalSerialize, CanonicalDeserialize)
 )]
 pub struct MemoryLayout {
     /// The total size of the elf's sections, including the .text, .data, .rodata, and .bss sections.
@@ -208,7 +248,7 @@ pub struct MemoryLayout {
     pub panic: u64,
     pub termination: u64,
     /// End of the memory region containing inputs, outputs, the panic bit,
-    /// and the termination bit
+    /// and the termination bit.
     pub io_end: u64,
 }
 
@@ -252,6 +292,11 @@ impl core::fmt::Debug for MemoryLayout {
 }
 
 impl MemoryLayout {
+    #[expect(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "layout construction panics on pathological config sizes; fallible construction is tracked as a follow-up in specs/verifier-closure-lints.md"
+    )]
     pub fn new(config: &MemoryConfig) -> Self {
         assert!(
             config.program_size.is_some(),
@@ -374,13 +419,13 @@ impl MemoryLayout {
         Self {
             program_size,
             max_trusted_advice_size,
-            max_untrusted_advice_size,
-            max_input_size,
-            max_output_size,
             trusted_advice_start,
             trusted_advice_end,
+            max_untrusted_advice_size,
             untrusted_advice_start,
             untrusted_advice_end,
+            max_input_size,
+            max_output_size,
             input_start,
             input_end,
             output_start,
@@ -400,8 +445,87 @@ impl MemoryLayout {
         self.trusted_advice_start.min(self.untrusted_advice_start)
     }
 
+    pub fn remap_word_address(&self, address: u64) -> Result<Option<u64>, MemoryLayoutError> {
+        if address == 0 {
+            return Ok(None);
+        }
+
+        let lowest_address = self.get_lowest_address();
+        if address >= lowest_address {
+            Ok(Some((address - lowest_address) / 8))
+        } else {
+            Err(MemoryLayoutError::AddressBelowLowest {
+                address,
+                lowest_address,
+            })
+        }
+    }
+
+    pub fn remapped_word_address(&self, address: u64) -> Result<u64, MemoryLayoutError> {
+        self.remap_word_address(address)?
+            .ok_or(MemoryLayoutError::ZeroAddress)
+    }
+
     /// Returns the total emulator memory (program + canary + stack + heap).
     pub fn get_total_memory_size(&self) -> u64 {
         self.heap_end - RAM_START_ADDRESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "Output too long")]
+    fn panics_when_output_exceeds_max() {
+        let memory_config = MemoryConfig {
+            program_size: Some(1024),
+            max_output_size: 8,
+            ..Default::default()
+        };
+        let mut device = JoltDevice::new(&memory_config);
+        // Use io_end which bypasses panic/termination early returns
+        // but still lands past the output region in convert_write_address
+        let overflow_address = device.memory_layout.io_end;
+        device.store(overflow_address, 0x42);
+    }
+
+    #[test]
+    fn packs_public_io_bytes_into_little_endian_words() {
+        let mut device = JoltDevice::new(&MemoryConfig {
+            program_size: Some(1024),
+            ..Default::default()
+        });
+        device.inputs = vec![1, 2, 3, 4, 5, 6, 7, 8, 9];
+        device.outputs = vec![0xaa, 0xbb];
+
+        assert_eq!(device.input_words_le(), vec![0x0807_0605_0403_0201, 9]);
+        assert_eq!(device.output_words_le(), vec![0xbbaa]);
+    }
+
+    #[test]
+    fn remaps_word_addresses_relative_to_lowest_reserved_address() {
+        let device = JoltDevice::new(&MemoryConfig {
+            program_size: Some(1024),
+            ..Default::default()
+        });
+        let layout = &device.memory_layout;
+        let lowest = layout.get_lowest_address();
+
+        assert_eq!(layout.remap_word_address(0), Ok(None));
+        assert_eq!(
+            layout.remapped_word_address(0),
+            Err(MemoryLayoutError::ZeroAddress)
+        );
+        assert_eq!(layout.remapped_word_address(lowest), Ok(0));
+        assert_eq!(layout.remapped_word_address(lowest + 16), Ok(2));
+        assert_eq!(
+            layout.remapped_word_address(lowest - 8),
+            Err(MemoryLayoutError::AddressBelowLowest {
+                address: lowest - 8,
+                lowest_address: lowest,
+            })
+        );
     }
 }

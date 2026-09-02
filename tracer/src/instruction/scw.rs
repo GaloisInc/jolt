@@ -2,24 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     declare_riscv_instr,
-    emulator::cpu::{Cpu, ReservationWidth, Xlen},
-    utils::inline_helpers::InstrAssembler,
-    utils::virtual_registers::VirtualRegisterAllocator,
+    emulator::cpu::{Cpu, ReservationWidth},
 };
 
-use super::add::ADD;
-use super::addi::ADDI;
 use super::format::format_r::FormatR;
-use super::lw::LW;
-use super::mul::MUL;
-use super::sub::SUB;
-use super::sw::SW;
-use super::virtual_advice::VirtualAdvice;
-use super::virtual_assert_eq::VirtualAssertEQ;
-use super::virtual_assert_lte::VirtualAssertLTE;
-use super::virtual_lw::VirtualLW;
-use super::virtual_sw::VirtualSW;
-use super::xori::XORI;
 use super::{Cycle, Instruction, RAMWrite, RISCVInstruction, RISCVTrace};
 
 declare_riscv_instr!(
@@ -35,18 +21,21 @@ impl SCW {
         let address = cpu.x[self.operands.rs1 as usize] as u64;
         let value = cpu.x[self.operands.rs2 as usize] as u32;
 
-        if cpu.has_reservation(address, ReservationWidth::Word) {
+        // Per RISC-V A spec, SC.W succeeds if the reservation set covers the 4
+        // bytes being written. An LR.D reservation (8 bytes) at the same
+        // address qualifies; an LR.W reservation (4 bytes) does too.
+        if cpu.reservation_covers(address, ReservationWidth::Word) {
             let result = cpu.mmu.store_word(address, value);
 
             match result {
                 Ok(memory_write) => {
                     *ram_access = memory_write;
-                    cpu.x[self.operands.rd as usize] = 0;
+                    cpu.write_register(self.operands.rd as usize, 0);
                 }
                 Err(_) => panic!("MMU store error"),
             }
         } else {
-            cpu.x[self.operands.rd as usize] = 1;
+            cpu.write_register(self.operands.rd as usize, 1);
         }
         // RISC-V spec: SC always invalidates the reservation regardless of success/failure
         cpu.clear_reservation();
@@ -56,141 +45,34 @@ impl SCW {
 impl RISCVTrace for SCW {
     fn trace(&self, cpu: &mut Cpu, trace: Option<&mut Vec<Cycle>>) {
         let address = cpu.x[self.operands.rs1 as usize] as u64;
-        let success = cpu.has_reservation(address, ReservationWidth::Word);
+        // See SCW::exec — SC.W succeeds for any reservation (word or
+        // doubleword) whose set covers the 4 bytes being written.
+        let success = cpu.reservation_covers(address, ReservationWidth::Word);
 
-        let mut inline_sequence = self.inline_sequence(&cpu.vr_allocator, cpu.xlen);
-
-        // VirtualAdvice is at index 0 — advise v_success (1=success, 0=failure)
-        if let Instruction::VirtualAdvice(instr) = &mut inline_sequence[0] {
-            instr.advice = success as u64;
-        }
-
+        // Patch v_success (1=success, 0=failure) into the first VirtualAdvice
+        // in the sequence, on a per-execution copy of the row. Locating it by
+        // type avoids fragility against changes to the sequence's prelude.
         let mut trace = trace;
-        for instr in inline_sequence {
-            instr.trace(cpu, trace.as_deref_mut());
-        }
+        let mut patched = false;
+        cpu.with_cached_inline_sequence(&Instruction::from(*self), |cpu, rows| {
+            for instr in rows {
+                let mut instr = *instr;
+                if !patched {
+                    if let Instruction::VirtualAdvice(v) = &mut instr {
+                        v.advice = success as u64;
+                        patched = true;
+                    }
+                }
+                instr.trace(cpu, trace.as_deref_mut());
+            }
+        });
+        assert!(patched, "SC.W inline sequence must contain a VirtualAdvice");
 
         cpu.clear_reservation();
     }
-
-    /// SC.W: Store Conditional Word
-    ///
-    /// Uses VirtualAdvice to support both success and failure paths:
-    /// - Success (v_success=1): reservation must match, store rs2, rd=0
-    /// - Failure (v_success=0): no constraint on reservation, store is no-op, rd=1
-    fn inline_sequence(
-        &self,
-        allocator: &VirtualRegisterAllocator,
-        xlen: Xlen,
-    ) -> Vec<Instruction> {
-        match xlen {
-            Xlen::Bit32 => self.inline_sequence_32(allocator),
-            Xlen::Bit64 => self.inline_sequence_64(allocator),
-        }
-    }
 }
 
-impl SCW {
-    fn inline_sequence_32(&self, allocator: &VirtualRegisterAllocator) -> Vec<Instruction> {
-        let v_reservation = allocator.reservation_w_register();
-        let v_reservation_d = allocator.reservation_d_register();
-        let mut asm = InstrAssembler::new(self.address, self.is_compressed, Xlen::Bit32, allocator);
-
-        // 0: Prover supplies success flag (1=success, 0=failure)
-        let v_success = allocator.allocate();
-        asm.emit_j::<VirtualAdvice>(*v_success, 0);
-
-        // 1-2: Constrain v_success ∈ {0, 1}
-        let v_one = allocator.allocate();
-        asm.emit_i::<ADDI>(*v_one, 0, 1);
-        asm.emit_b::<VirtualAssertLTE>(*v_success, *v_one, 0);
-        drop(v_one);
-
-        // 3-5: success → reservation must match
-        let v_addr_diff = allocator.allocate();
-        asm.emit_r::<SUB>(*v_addr_diff, v_reservation, self.operands.rs1);
-        asm.emit_r::<MUL>(*v_addr_diff, *v_success, *v_addr_diff);
-        asm.emit_b::<VirtualAssertEQ>(*v_addr_diff, 0, 0);
-        drop(v_addr_diff);
-
-        // 6-10: Conditional store (VirtualLW/VirtualSW for 32-bit mode)
-        let v_mem = allocator.allocate();
-        asm.emit_i::<VirtualLW>(*v_mem, self.operands.rs1, 0);
-
-        let v_diff = allocator.allocate();
-        asm.emit_r::<SUB>(*v_diff, self.operands.rs2, *v_mem);
-        asm.emit_r::<MUL>(*v_diff, *v_diff, *v_success);
-        asm.emit_r::<ADD>(*v_diff, *v_mem, *v_diff);
-        drop(v_mem);
-
-        asm.emit_s::<VirtualSW>(self.operands.rs1, *v_diff, 0);
-        drop(v_diff);
-
-        // 11-13: Clear both reservation registers, set rd = !v_success
-        asm.emit_i::<ADDI>(v_reservation, 0, 0);
-        asm.emit_i::<ADDI>(v_reservation_d, 0, 0);
-        asm.emit_i::<XORI>(self.operands.rd, *v_success, 1);
-        drop(v_success);
-
-        asm.finalize()
-    }
-
-    fn inline_sequence_64(&self, allocator: &VirtualRegisterAllocator) -> Vec<Instruction> {
-        let v_reservation = allocator.reservation_w_register();
-        let v_reservation_d = allocator.reservation_d_register();
-        let mut asm = InstrAssembler::new(self.address, self.is_compressed, Xlen::Bit64, allocator);
-
-        // 0: Prover supplies success flag (1=success, 0=failure)
-        let v_success = allocator.allocate();
-        asm.emit_j::<VirtualAdvice>(*v_success, 0);
-
-        // 1-2: Constrain v_success ∈ {0, 1}
-        let v_one = allocator.allocate();
-        asm.emit_i::<ADDI>(*v_one, 0, 1);
-        asm.emit_b::<VirtualAssertLTE>(*v_success, *v_one, 0);
-        drop(v_one);
-
-        // 3-5: success → reservation must match
-        let v_addr_diff = allocator.allocate();
-        asm.emit_r::<SUB>(*v_addr_diff, v_reservation, self.operands.rs1);
-        asm.emit_r::<MUL>(*v_addr_diff, *v_success, *v_addr_diff);
-        asm.emit_b::<VirtualAssertEQ>(*v_addr_diff, 0, 0);
-        drop(v_addr_diff);
-
-        // 6: Spill v_success to a reservation register. In 64-bit mode, LW/SW
-        // expand into sub-instructions that allocate up to 7 instruction registers
-        // each, so we must have 0 instruction registers live during those expansions.
-        asm.emit_i::<ADDI>(v_reservation, *v_success, 0);
-        drop(v_success);
-
-        // 7-11: Conditional store
-        //   store_val = mem + (rs2 - mem) * v_success
-        //   → stores rs2 on success, stores mem back (no-op) on failure
-        let v_mem = allocator.allocate();
-        asm.emit_ld::<LW>(*v_mem, self.operands.rs1, 0);
-
-        let v_diff = allocator.allocate();
-        asm.emit_r::<SUB>(*v_diff, self.operands.rs2, *v_mem);
-        asm.emit_r::<MUL>(*v_diff, *v_diff, v_reservation);
-        asm.emit_r::<ADD>(*v_diff, *v_mem, *v_diff);
-        drop(v_mem);
-
-        // Spill store value to v_reservation_d
-        asm.emit_i::<ADDI>(v_reservation_d, *v_diff, 0);
-        drop(v_diff);
-
-        // 12: Store word
-        // Peak: 0 instr regs + SW expansion (7 temps) = 7 of 7
-        asm.emit_s::<SW>(self.operands.rs1, v_reservation_d, 0);
-
-        // 13-15: Set rd = !v_success, then clear both reservation registers
-        asm.emit_i::<XORI>(self.operands.rd, v_reservation, 1);
-        asm.emit_i::<ADDI>(v_reservation, 0, 0);
-        asm.emit_i::<ADDI>(v_reservation_d, 0, 0);
-
-        asm.finalize()
-    }
-}
+impl SCW {}
 
 #[cfg(test)]
 mod tests {
@@ -319,8 +201,9 @@ mod tests {
     }
 
     /// Verify that SC.W's inline sequence clears BOTH reservation registers (vr32 and vr33).
-    /// This catches the cross-width cleanup bug: without clearing vr33, a subsequent SC.D
-    /// could succeed against a stale reservation left by a prior LR.D.
+    /// This guards against leaking a stale reservation across SCs: SC always invalidates
+    /// the reservation regardless of success, so both `v_reservation_w` and
+    /// `v_reservation_d` must be zeroed.
     #[test]
     fn test_scw_inline_sequence_clears_both_reservation_registers() {
         let mut cpu = setup_cpu();
@@ -328,7 +211,8 @@ mod tests {
         cpu.mmu.store_doubleword(addr, 0xDEADBEEF_CAFEBABE).unwrap();
         cpu.x[11] = addr as i64;
 
-        // LR.D sets reservation_d (vr33)
+        // LR.D sets reservation_d (vr33) and (with the spec-correct fix)
+        // reservation_w (vr32) too, so SC.W after LR.D succeeds.
         let decoded = Instruction::decode(encode_lrd(10, 11), 0x1000, false).unwrap();
         let Instruction::LRD(lrd) = decoded else {
             panic!("Expected LRD");
@@ -336,7 +220,8 @@ mod tests {
         let mut trace = Vec::new();
         lrd.trace(&mut cpu, Some(&mut trace));
 
-        // SC.W fails (width mismatch), but must clear BOTH vr32 and vr33
+        // SC.W succeeds (reservation set covers its 4-byte write); both
+        // reservation registers must still be cleared afterwards.
         cpu.x[12] = 0x12345678;
         let decoded = Instruction::decode(encode_scw(13, 11, 12), 0x1004, false).unwrap();
         let Instruction::SCW(scw) = decoded else {
@@ -363,15 +248,21 @@ mod tests {
         );
     }
 
+    /// SC.W after LR.D at the same address should SUCCEED per the RISC-V A
+    /// spec: LR.D reserves 8 bytes, which contains the 4 bytes SC.W writes.
+    /// ACT4's Zalrsc-sc.w-00.S cp_custom_sc_lrsc_prev_lr_lr_d case exercises
+    /// this. Prior tracer behavior (strict width-match) diverged from Sail
+    /// and caused that test to fail; this test locks in the spec-correct
+    /// behavior.
     #[test]
-    fn test_scw_after_lrd_fails_mixed_width() {
+    fn test_scw_after_lrd_succeeds() {
         let mut cpu = setup_cpu();
         let addr = DRAM_BASE;
         cpu.mmu.store_doubleword(addr, 0xDEADBEEF_CAFEBABE).unwrap();
 
         cpu.x[11] = addr as i64;
 
-        // LR.D sets a doubleword reservation
+        // LR.D sets an 8-byte reservation.
         let decoded = Instruction::decode(encode_lrd(10, 11), 0x1000, false).unwrap();
         let Instruction::LRD(lrd) = decoded else {
             panic!("Expected LRD");
@@ -379,8 +270,10 @@ mod tests {
         let mut trace = Vec::new();
         lrd.trace(&mut cpu, Some(&mut trace));
 
-        // SC.W to same address should fail (width mismatch)
-        cpu.x[12] = 0x12345678;
+        // SC.W at same address should succeed because the 4-byte write fits
+        // inside the 8-byte reservation set.
+        let store_val: u32 = 0x12345678;
+        cpu.x[12] = store_val as i64;
         let decoded = Instruction::decode(encode_scw(13, 11, 12), 0x1004, false).unwrap();
         let Instruction::SCW(scw) = decoded else {
             panic!("Expected SCW");
@@ -388,9 +281,111 @@ mod tests {
         let mut trace = Vec::new();
         scw.trace(&mut cpu, Some(&mut trace));
 
+        assert_eq!(cpu.x[13], 0, "SC.W after LR.D should succeed (rd=0)");
+        let (val, _) = cpu.mmu.load_word(addr).unwrap();
         assert_eq!(
-            cpu.x[13], 1,
-            "SC.W after LR.D should fail (mixed width, rd=1)"
+            val, store_val,
+            "memory at addr should contain x12's low 32 bits after sc.w"
+        );
+    }
+
+    /// Reproduces the first test case from ACT4's Zalrsc-sc.w-00.S, executed
+    /// via the emulator's .execute() path (what jolt-emu's run_test uses by
+    /// default, not the .trace() path exercised by the other tests in this
+    /// file). Writes the exact scratch init pattern, runs lr.w→sc.w→ld,
+    /// verifies x26 and the subsequent ld match what Sail produces.
+    #[test]
+    fn test_scw_act4_first_case_exec_path() {
+        let mut cpu = setup_cpu();
+        let addr = DRAM_BASE;
+        // Initial scratch word per rvtest_setup.h:283:
+        //   .dword 0xDEAD0001FFFEBEEF, 0xDEAD0002FFFDBEEF, ...
+        cpu.mmu.store_doubleword(addr, 0xDEAD0001FFFEBEEF).unwrap();
+
+        cpu.x[1] = addr as i64;
+        cpu.x[12] = 0x0f2091f8cdf4dcc0_u64 as i64;
+
+        // lr.w x0, (x1) — establish reservation; x0 write is discarded.
+        let decoded = Instruction::decode(encode_lrw(0, 1), 0x1000, false).unwrap();
+        decoded.execute(&mut cpu);
+
+        // sc.w x26, x12, (x1) — store 32-bit low half of x12 at (x1); x26 = 0.
+        let decoded = Instruction::decode(encode_scw(26, 1, 12), 0x1004, false).unwrap();
+        decoded.execute(&mut cpu);
+
+        assert_eq!(cpu.x[26], 0, "sc.w should succeed after matching lr.w");
+
+        // LREG on RV64 is ld — load 8 bytes, little-endian. Upper 4 bytes
+        // should be unchanged from the scratch init; low 4 bytes should be
+        // x12[31:0] = 0xcdf4dcc0.
+        let (loaded, _) = cpu.mmu.load_doubleword(addr).unwrap();
+        assert_eq!(
+            loaded, 0xDEAD0001CDF4DCC0,
+            "after sc.w (word store), ld should see init high + stored low; got 0x{loaded:016x}"
+        );
+    }
+
+    /// SC.W to a non-RAM (I/O) address must be rejected by the
+    /// inline-sequence RAM-range constraint. Without this constraint, the
+    /// failure-path store would flip the device's panic flag via the
+    /// byte-level store handler, mutating the proof's public I/O.
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_scw_to_io_rejected() {
+        let mut cpu = setup_cpu();
+        let panic_addr = cpu
+            .get_mut_mmu()
+            .jolt_device
+            .as_ref()
+            .unwrap()
+            .memory_layout
+            .panic;
+
+        cpu.x[11] = panic_addr as i64; // rs1 points at the panic byte
+        cpu.x[12] = 0x12345678;
+
+        let decoded = Instruction::decode(encode_scw(13, 11, 12), 0x1000, false).unwrap();
+        let Instruction::SCW(scw) = decoded else {
+            panic!("Expected SCW");
+        };
+
+        let mut trace = Vec::new();
+        scw.trace(&mut cpu, Some(&mut trace));
+    }
+
+    /// Regression test: SC.W with rd=x0 must still succeed when a reservation
+    /// is held. Before the fix, dispatching through the generic rd=x0 rewrite
+    /// path bypassed VirtualAdvice patching, so the prover-supplied success
+    /// flag was always 0 (failure) — causing the store to be a no-op even with
+    /// a valid reservation.
+    #[test]
+    fn test_scw_rd_x0_preserves_reservation_semantics() {
+        let mut cpu = setup_cpu();
+        let addr = DRAM_BASE;
+        let original_val: u32 = 0xDEADBEEF;
+        let store_val: u32 = 0x12345678;
+        cpu.mmu.store_word(addr, original_val).unwrap();
+
+        cpu.x[11] = addr as i64;
+        cpu.x[12] = store_val as i64;
+
+        // LR.W with rd=x0: establishes a reservation but discards the loaded value.
+        // Use Instruction::trace() (the enum dispatch) to exercise the exclusion list.
+        let decoded = Instruction::decode(encode_lrw(0, 11), 0x1000, false).unwrap();
+        let mut trace = Vec::new();
+        decoded.trace(&mut cpu, Some(&mut trace));
+
+        // SC.W with rd=x0: should succeed (reservation is held) and write memory.
+        // Again use Instruction::trace() to exercise the enum dispatch path.
+        let decoded = Instruction::decode(encode_scw(0, 11, 12), 0x1004, false).unwrap();
+        let mut trace = Vec::new();
+        decoded.trace(&mut cpu, Some(&mut trace));
+
+        // The store must have succeeded: memory should contain the new value.
+        let (val, _) = cpu.mmu.load_word(addr).unwrap();
+        assert_eq!(
+            val, store_val,
+            "SC.W with rd=x0 should still store when reservation is held"
         );
     }
 }

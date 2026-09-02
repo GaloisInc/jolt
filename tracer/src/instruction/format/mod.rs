@@ -1,4 +1,5 @@
-use crate::emulator::cpu::{Cpu, Xlen};
+use crate::emulator::cpu::Cpu;
+pub use jolt_riscv::NormalizedOperands;
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Debug;
 
@@ -7,23 +8,18 @@ pub mod format_amo;
 pub mod format_assert_align;
 pub mod format_b;
 pub mod format_fence;
+#[cfg(feature = "field-inline")]
+pub mod format_field_inline;
 pub mod format_i;
 pub mod format_inline;
 pub mod format_j;
 pub mod format_load;
 pub mod format_r;
 pub mod format_s;
+pub mod format_t;
 pub mod format_u;
 pub mod format_virtual_right_shift_i;
 pub mod format_virtual_right_shift_r;
-
-#[derive(Default, Debug, Clone, Copy, PartialEq)]
-pub struct NormalizedOperands {
-    pub rs1: Option<u8>,
-    pub rs2: Option<u8>,
-    pub rd: Option<u8>,
-    pub imm: i128,
-}
 
 pub trait InstructionFormat:
     Default + Debug + From<NormalizedOperands> + Into<NormalizedOperands>
@@ -35,6 +31,10 @@ pub trait InstructionFormat:
     fn capture_post_execution_state(&self, state: &mut Self::RegisterState, cpu: &mut Cpu);
     #[cfg(any(feature = "test-utils", test))]
     fn random(rng: &mut rand::rngs::StdRng) -> Self;
+
+    /// Overwrite the destination register. Default is a no-op for formats
+    /// without a destination register (branches, stores).
+    fn set_rd(&mut self, _rd: u8) {}
 }
 
 pub trait InstructionRegisterState:
@@ -53,16 +53,17 @@ pub trait InstructionRegisterState:
     }
 }
 
-pub fn normalize_register_value(value: i64, xlen: &Xlen) -> u64 {
-    match xlen {
-        Xlen::Bit32 => value as u32 as u64,
-        Xlen::Bit64 => value as u64,
-    }
+pub fn normalize_register_value(cpu: &Cpu, reg: usize) -> u64 {
+    let value = match reg {
+        0 => {
+            debug_assert_eq!(cpu.x[reg], 0);
+            0
+        }
+        _ => cpu.x[reg],
+    };
+    value as u64
 }
 
-pub fn normalize_imm(imm: u64, xlen: &Xlen) -> i64 {
-    match xlen {
-        Xlen::Bit32 => imm as i32 as i64,
-        Xlen::Bit64 => imm as i64,
-    }
+pub fn normalize_imm(imm: u64) -> i64 {
+    imm as i64
 }

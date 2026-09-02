@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
 Jolt is a zkVM (zero-knowledge virtual machine) for RISC-V (RV64IMAC) that efficiently proves and verifies program execution. It uses sumcheck-based protocols, multilinear polynomial commitments (Dory), and the Twist/Shout lookup argument.
@@ -11,57 +9,106 @@ Jolt is a zkVM (zero-knowledge virtual machine) for RISC-V (RV64IMAC) that effic
 ### Linting and Formatting
 
 ```bash
-cargo clippy --all --message-format=short -q --all-targets --features allocative,host -- -D warnings
+# Must pass in both standard and ZK modes
+cargo clippy --all --features host -q --all-targets -- -D warnings
+cargo clippy --all --features host,zk -q --all-targets -- -D warnings
 cargo fmt -q
 ```
 
 ### Testing
 
 ```bash
-# CRITICAL: Always use cargo nextest, never cargo test
+# Always cargo nextest, never cargo test
 cargo nextest run --cargo-quiet
 
 # Run specific test in specific package
 cargo nextest run -p [package_name] [test_name] --cargo-quiet
 
-# CRITICAL: Primary correctness check — run muldiv e2e test
-cargo nextest run -p jolt-core muldiv --cargo-quiet
+# Primary correctness check — run muldiv e2e test in both modes
+cargo nextest run -p jolt-prover-legacy muldiv --cargo-quiet --features host
+cargo nextest run -p jolt-prover-legacy muldiv --cargo-quiet --features host,zk
+
+# Modular prover acceptance suites (mirror CI): clear-mode byte-diff ratchets
+# vs the legacy prover, and the modular ZK e2e (muldiv accept, tamper reject,
+# advice, committed program)
+cargo nextest run -p jolt-prover --features prover-fixtures --cargo-quiet
+cargo nextest run -p jolt-prover --features prover-fixtures,zk --cargo-quiet
+
+# CUDA backend (specs/cuda-prover.md). The `cuda` feature gates LINKAGE only —
+# backend choice is JoltBackend::cuda() vs ::reference(), a runtime value. Both
+# suites add a CUDA arm asserting byte-identity with legacy; device tests skip
+# (not fail) with no GPU. NVRTC compiles only at first device use, so the Rust
+# build cannot catch a kernel error — run the kernels suite after any kernel
+# rename or signature change.
+cargo nextest run -p jolt-kernels --features cuda cuda:: --cargo-quiet
+cargo nextest run -p jolt-prover --features prover-fixtures,cuda --cargo-quiet
 ```
 
 ### Building
 
 ```bash
 # Prefer clippy over build for validation. Only build when preparing to execute a binary.
-cargo build -p jolt-core --message-format=short -q
+cargo build -p jolt-prover-legacy -q
+
+# After pulling changes, reinstall the jolt CLI or guest builds may fail.
+cargo install --path . --locked
 ```
 
 ### Profiling
 
 ```bash
-# Execution trace (viewable in Perfetto)
-cargo run --release -p jolt-core profile --name sha3 --format chrome
-# --name options: sha2, sha3, sha2-chain, fibonacci, btreemap
+# Modular prover (primary): emits benchmark-runs/{timestamp}_modular_{name}_{scale}/ containing trace.json
+# (Perfetto UI / trace_processor SQL), summary.json (machine-queryable), and memory.html,
+# with benchmark-runs/latest_modular_{name}_{scale} symlinked to the newest successful run.
+cargo run --release -p jolt-prover --features profiling -- profile --name fibonacci --format chrome
+# --name options (default scale): fibonacci (16), sha2-chain (22), sha3-chain (22), btreemap (20)
+# --scale <log2 trace length> overrides; --format none = no-subscriber Instant baseline
+# --backend reference (default, naive test oracle) | optimized (performance tier, legacy-parity);
+# optimized artifacts get an _optimized suffix on the run dir and latest_ symlink
 
-# With CPU/memory monitoring (adds counter tracks to Perfetto trace)
-cargo run --release --features monitor -p jolt-core profile --name sha3 --format chrome
+# Canonical summary queries (no Perfetto UI needed) — see book/src/usage/profiling/zkvm_profiling.md
+jq '.stages | map({label, s: (.wall_time_ns/1e9)})' benchmark-runs/latest_modular_fibonacci_16/summary.json
+jq '.spans | to_entries | sort_by(-.value.total_ns) | .[:10]' benchmark-runs/latest_modular_fibonacci_16/summary.json
 
-# Memory profiling (outputs SVG flamegraphs)
-RUST_LOG=debug cargo run --release --features allocative -p jolt-core profile --name sha3 --format chrome
+# Multi-scale sweep (one profile subprocess per run; results in benchmark-runs/modular_timings.csv,
+# rendered by scripts/benchmark_summary.py, plot_benchmarks.py, plot_memory_usage.py)
+cargo run --release -p jolt-prover --features profiling -- benchmark --min-scale 18 --max-scale 21 --resume
+
+# Per-batch heap snapshots (*.folded in the run directory, exact bytes; totals in summary.json's .heap; rendered by memory.html)
+cargo run --release -p jolt-prover --features profiling,allocative -- profile --name fibonacci --format chrome
+
+# Legacy comparison (the CUDA performance gate): both provers, one guest/input,
+# median of N, proof bytes asserted identical. --skip-modular records the legacy
+# target (the reference tier is ~230x slower, so it cannot run at gate scales);
+# --skip-legacy iterates on a kernel. Baselines: sha2-chain 2^20 = 9.4s, 2^22 = 19.1s.
+cargo run --release -p jolt-prover --features profiling,cuda -- compare --name sha2-chain --scale 22 --backend cuda
+
+# jolt-eval telemetry objectives over the same summary (grammar: telemetry:<workload>:<metric>)
+cargo run -p jolt-eval --bin measure-objectives -- --objective telemetry:fibonacci:prover_time_s
+
+# Legacy prover
+cargo run --release -p jolt-prover-legacy profile --name sha3 --format chrome
+# --name options: sha2, sha3, sha2-chain, sha3-chain, fibonacci, btreemap
+RUST_LOG=debug cargo run --release --features allocative -p jolt-prover-legacy profile --name sha3 --format chrome
 ```
+
+The span taxonomy (versioned, normative) lives in `crates/jolt-profiling/src/taxonomy.rs` — renaming a span is a schema change (summary keys and `telemetry:*` objectives break; the profiling smoke test enforces label presence, but it is not yet CI-wired — run it explicitly after taxonomy changes, see the NOTE in `.github/workflows/rust.yml`).
 
 ## Architecture
 
 ### Crate Structure
 
-Arkworks dependencies use a fork: `a16z/arkworks-algebra` branch `dev/twist-shout` (patched via `[patch.crates-io]` in root `Cargo.toml`).
+The workspace is mid-decomposition: `crates/` holds the modular stack (jolt-verifier, jolt-prover, jolt-sumcheck, jolt-poly, jolt-blindfold, jolt-witness, jolt-openings, jolt-r1cs, jolt-dory, jolt-transcript, jolt-utils, …27 crates), while **crates/jolt-prover-legacy** is the legacy monolith mapped below. Top-level crates: `tracer`, `jolt-sdk`, `jolt-inlines`, `common`.
 
-**jolt-core** — Core proving system
+Arkworks dependencies use a fork: `a16z/arkworks-algebra` branch `dev/twist-shout`, pinned in the root `Cargo.toml`.
+
+**jolt-prover-legacy** — Legacy core proving system
 
 - `host/`: Guest ELF compilation and program analysis (feature-gated behind `host`)
 - `zkvm/`: Jolt PIOP — prover, verifier, R1CS/Spartan, memory checking, instruction lookups
 - `poly/`: Polynomial types, commitment schemes (Dory, HyperKZG), opening proofs
 - `field/`: `JoltField` trait and BN254 scalar field implementation
-- `subprotocols/`: Sumcheck (batched, streaming, univariate skip), booleanity checks
+- `subprotocols/`: Sumcheck (batched, streaming, univariate skip), booleanity checks, BlindFold ZK protocol
 - `msm/`: Multi-scalar multiplication
 - `transcripts/`: Fiat-Shamir transcripts (Blake2b, Keccak)
 
@@ -73,7 +120,7 @@ Arkworks dependencies use a fork: `a16z/arkworks-algebra` branch `dev/twist-shou
 
 **common** — Shared constants (`XLEN`, `REGISTER_COUNT`, thresholds) and `JoltDevice`/`MemoryLayout` types
 
-Feature flag hierarchy: `host` ⊃ `prover` ⊃ `minimal`. Most code is unconditional; `host/` is the main gated module.
+Feature flag hierarchy: `host` ⊃ `prover` ⊃ `minimal`. Most code is unconditional; `host/` is the main gated module. The `akita` feature selects the packed (lattice/Akita) commitment mode — mutually exclusive with `zk` (compile error on the combination).
 
 ### Key Type Parameters
 
@@ -93,6 +140,7 @@ ProofTranscript: Transcript               — Fiat-Shamir transcript (Blake2bTra
 4. **Spartan**: R1CS constraint satisfaction via univariate skip + outer/product sumchecks
 5. **Sumcheck rounds**: Batched sumchecks for instruction lookups, bytecode, RAM/register read-write checking, Hamming booleanity, claim reductions
 6. **Opening proofs**: Batched Dory opening proofs via `ProverOpeningAccumulator`
+7. **BlindFold**: ZK proof over all sumcheck stages (see BlindFold section below)
 
 ### Polynomial Types (poly/)
 
@@ -120,11 +168,76 @@ Virtual (derived during proving): PC, register values, RAM values, instruction f
 - `bytecode/`: Bytecode preprocessing and PC mapping, read-RAF checking
 - `config.rs`: `OneHotParams`, `OneHotConfig`, `ReadWriteConfig` — control proof structure (chunk sizes, phase rounds)
 
+### ZK Feature Gate
+
+The `zk` Cargo feature (`cfg(feature = "zk")`) controls zero-knowledge mode:
+
+| Aspect | Standard (`--features host`) | ZK (`--features host,zk`) |
+|---|---|---|
+| Sumcheck proving | `BatchedSumcheck::prove` — cleartext round polys | `BatchedSumcheck::prove_zk` — Pedersen-committed |
+| Uni-skip | `prove_uniskip_round` | `prove_uniskip_round_zk` |
+| Proof contains | `Claims<F>` (all opening claims) | `BlindFoldProof` (no cleartext claims) |
+| `input_claim()` | Called, appended to Fiat-Shamir transcript | Skipped; `input_claim_constraint()` used by BlindFold |
+| Output claim check | Explicit equality check | Skipped; verified by BlindFold R1CS |
+| Opening proof | `bind_opening_inputs` (raw eval) | `bind_opening_inputs_zk` (committed eval) |
+
+**Key cfg-gated items:**
+- `JoltProof::opening_claims: Claims<F>` — `#[cfg(not(feature = "zk"))]`
+- `JoltProof::blindfold_proof: BlindFoldProof` — `#[cfg(feature = "zk")]`
+- Prover uses `#[cfg(feature = "zk")]` / `#[cfg(not(feature = "zk"))]` blocks — compile-time path selection, no runtime `zk_mode` field
+- Verifier zk mode is fixed at compile time (`zk` feature → `JOLT_VERIFIER_CONFIG` in `crates/jolt-verifier/src/config.rs`); the proof self-describes its protocol (`JoltProof::protocol: JoltProtocolConfig`) and `validate_proof_config` rejects a mismatch fail-closed
+
+**CRITICAL — Verifier `new_from_verifier` must support both modes:**
+
+In ZK mode, `input_claim()` is never called so verifier params can use partial values (e.g., `init_eval = init_eval_public`). In standard mode, `input_claim()` IS called and the values must match the prover exactly. Any verifier param that decomposes a value for BlindFold constraints must reconstruct the full value for standard mode. Use `ram::reconstruct_full_eval()` to add advice contributions back.
+
+### BlindFold Zero-Knowledge Protocol (subprotocols/blindfold/)
+
+BlindFold makes all sumcheck proofs zero-knowledge without SNARK composition. Instead of revealing sumcheck round polynomial coefficients, the prover sends Pedersen commitments. Sumcheck verifier checks are encoded into a small verifier R1CS, proved via Nova folding + Spartan. (The modular prover has full ZK support: `crates/jolt-blindfold` plus `crates/jolt-prover/src/blindfold.rs` and `recorder.rs`, behind jolt-prover's compile-time `zk` feature — see `specs/jolt-prover-blindfold.md`. The module map below is the legacy implementation.)
+
+**Module structure:**
+- `mod.rs`: `StageConfig`, `BakedPublicInputs`, `HyraxParams`, R1CS primitives (`Variable`, `LinearCombination`, `Constraint`)
+- `r1cs.rs`: `VerifierR1CS`, `VerifierR1CSBuilder` — sparse R1CS encoding of sumcheck verification
+- `protocol.rs`: `BlindFoldProver`, `BlindFoldVerifier`, `BlindFoldProof`
+- `folding.rs`: Nova folding — cross-term computation, random instance sampling
+- `spartan.rs`: Spartan outer + inner sumcheck over the folded R1CS
+- `relaxed_r1cs.rs`: Relaxed R1CS instance/witness with Hyrax grid layout
+- `witness.rs`: `BlindFoldWitness` — witness assignment from sumcheck stage data
+- `output_constraint.rs`: `InputClaimConstraint`, `OutputClaimConstraint`, `ValueSource`, `ProductTerm` — constraint types for claim binding
+- `layout.rs`: `LayoutStep`, `ConstraintKind`, `compute_witness_layout` — witness grid layout computation
+
+**Protocol flow:**
+1. During stages 1–7, `prove_zk` commits each sumcheck round's coefficients via Pedersen and caches them in `ProverOpeningAccumulator`
+2. At stage 8, prover and verifier build the same `VerifierR1CS` from `StageConfig`s and `BakedPublicInputs` (Fiat-Shamir-derived values baked into matrix coefficients)
+3. Nova folds the real instance with a random satisfying instance to hide the witness
+4. Spartan outer sumcheck proves relaxed R1CS satisfaction; inner sumcheck reduces to a single witness evaluation
+5. Hyrax-style openings verify W(ry) and E(rx) against folded row commitments
+
+**Supporting changes:**
+- `poly/commitment/pedersen.rs`: Pedersen commitment scheme for small vectors (round polynomials)
+- `curve.rs`: `JoltCurve`/`JoltGroupElement` traits for elliptic curve abstractions
+- `poly/commitment/dory/commitment_scheme.rs`: ZK evaluation commitments (`y_com`) — Dory proves evaluation correctness without revealing the evaluation value
+- `sumcheck.rs` / `univariate_skip.rs`: `prove_zk`/`verify_zk` variants
+
+**CRITICAL INVARIANT — Sumcheck claim/constraint synchronization:**
+
+Every sumcheck instance implements `SumcheckInstanceParams` which defines both the claim computation AND the corresponding BlindFold constraint. These must stay in sync:
+
+- `input_claim(accumulator)` computes the input claim value from polynomial openings
+- `input_claim_constraint()` returns an `InputClaimConstraint` describing the same formula as a sum-of-products over `ValueSource::{Opening, Challenge, Constant}` terms
+- `input_constraint_challenge_values(accumulator)` returns the public challenge values the constraint evaluates against
+- `output_claim_constraint()` / `output_constraint_challenge_values()` — same pattern for output claims
+
+**Any change to how a sumcheck's input or output claim is derived requires a matching update to its constraint.** If you modify `input_claim()` to include a new term, you must add a corresponding `ProductTerm` to `input_claim_constraint()` and supply any new challenge values. Failure to synchronize causes BlindFold R1CS unsatisfiability — the `muldiv` e2e test will catch this.
+
+**Corollary — prover/verifier `input_claim()` consistency:** When a value is decomposed for BlindFold constraints (e.g., `init_eval` split into `init_eval_public` + advice terms), the verifier's `new_from_verifier` must reconstruct the full value for `input_claim()` in standard mode. If only the public portion is stored, the verifier computes a different `input_claim` than the prover, causing a Fiat-Shamir transcript mismatch. The `advice` e2e tests catch this (they exercise non-ZK mode with advice polynomials).
+
+Concrete implementations: `OuterRemainingSumcheckParams` (spartan/outer.rs), `RamReadWriteCheckingParams` (ram/read_write_checking.rs), `InstructionRaSumcheckParams` (instruction_lookups/ra_virtual.rs), and all claim reduction params.
+
 ## Development Guidelines
 
 ### Performance
 
-- PERFORMANCE IS CRITICAL AND TOP PRIORITY
 - Profile before optimizing
 - Benchmark changes to `poly/` code — small regressions multiply across thousands of sumcheck rounds
 - Use `#[inline]` judiciously in hot paths
@@ -138,26 +251,23 @@ Virtual (derived during proving): PC, register values, RAM values, instruction f
 
 ### Code Style
 
-- `cargo fmt` + `cargo clippy` with zero warnings
 - Codebase uses `non_snake_case` convention for math variables: `log_T`, `ram_K`, `log_K`, etc.
+- Import types and structs, then reference them by short names; use fully qualified paths only to resolve ambiguity.
+- Alias an instruction-kind enum as `Kind` at emitter call sites and write `Kind::INSTRUCTION`; never qualify emitted instructions with `SourceInstructionKind`, `JoltInstructionKind`, or a module path.
+- Before PR handoff, audit every added test and helper. Remove development-only probes, ignored tests, temporary benchmarks, diagnostic counters or histograms, and one-off fuzz or parity scaffolding. Keep permanent tests only when they add a distinct failure signal beyond existing tests, golden fixtures, or CI. If a manual diagnostic is worth keeping, make it an intentional tool or benchmark with a documented command.
 
-### Comment Policy
+### Testing Guidelines
 
-**Delete these comment types:**
-- Section separators (`// ==========`, `// ----------`)
-- Doc comments that restate the item name (`/// Sumcheck prover for X` on `XProver`)
-- Obvious comments (`/// Returns the count` on `get_count()`)
-- Commented-out code
-- TODOs without issue links
+- Do not add old-vs-new equivalence tests that reimplement the pre-change logic as the oracle. Transition-validation belongs in the PR process (byte-parity CI vs a living reference, one-off scripts), not the permanent suite. Permanent tests must assert against independent ground truth: spec vectors, golden fixtures, live reference paths (e.g. `jolt-kernels`' reference tier, the legacy-prover byte-parity suites), or properties. If the old code is deleted, its reimplementation in a test is dead weight — delete the test rather than keep the old logic alive inside it. A `#[cfg(test)]` copy of superseded production code "kept as the oracle" is the same anti-pattern.
 
-**Keep these comment types:**
-- WHY something is done (when not obvious)
-- WARNING comments for non-obvious gotchas
-- SAFETY comments for unsafe blocks
-- Complex algorithm explanations (link to paper if applicable)
-- Public API docs that explain behavior, constraints, or invariants
+### Lint Policy
 
-### Testing
+- Workspace enforces `allow_attributes = "deny"` — use `#[expect(...)]` instead of `#[allow(...)]`
+- The jolt-verifier runtime closure (19 crates, listed in `specs/verifier-closure-lints.md`) carries stricter crate-root lints: panic-source denies (`indexing_slicing` in control-plane crates, `panic_in_result_fn`, `wildcard_enum_match_arm`, ...), `forbid(unsafe_code)` where a crate has no unsafe, and numeric-discipline denies in jolt-verifier itself — which additionally denies `unreachable`, the only abort macro that escapes both `panic` and `panic_in_result_fn`. New code in those crates must fix the lint or add `#[expect(clippy::..., reason = "...")]` at the narrowest scope with a real justification
+- `.unwrap()` and `.expect()` are fine in tests. In non-test code, avoid them unless the alternative significantly hurts readability (e.g., infallible fixed-size array conversions). When used, annotate the function with `#[expect(clippy::unwrap_used)]` or `#[expect(clippy::expect_used)]`
+- Use `#[expect(clippy::...)]` on test modules to blanket-suppress test-inappropriate lints rather than per-function annotations
 
-- Always use `cargo nextest` (never `cargo test`)
-- Run `muldiv` e2e test as primary correctness check
+### Comments
+
+Match the codebase's low comment density. Worth writing: WHY comments, WARNING for non-obvious gotchas, SAFETY on unsafe blocks, algorithm explanations (link to paper if applicable), public API docs stating behavior or invariants. TODOs need issue links.
+Do not narrate code or test assertions. If a comment only restates an expression, make the code self-documenting instead.

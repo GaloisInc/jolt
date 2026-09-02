@@ -1,0 +1,105 @@
+mod descriptors;
+mod device;
+mod packed;
+mod tables;
+#[cfg(test)]
+mod tests;
+
+pub use device::{DeviceTrace, COLD};
+pub use packed::{
+    PackedTrace, EXTRA_IMM_HI, EXTRA_IMM_LO, EXTRA_RAM_READ, EXTRA_RAM_WRITE, EXTRA_RD_POST,
+    EXTRA_RD_PRE, EXTRA_REGISTERS, EXTRA_RS1, EXTRA_RS2, EXTRA_WORDS, NO_SEQUENCE, RAM_NO_ACCESS,
+    REGISTER_ABSENT,
+};
+
+pub struct DeviceAtomColumns {
+    pub flags: cudarc::driver::CudaSlice<u32>,
+    pub table_index: cudarc::driver::CudaSlice<u32>,
+    pub bytecode_pc: cudarc::driver::CudaSlice<u64>,
+    pub rd_pre_value: cudarc::driver::CudaSlice<u64>,
+    pub rs1_address: cudarc::driver::CudaSlice<u32>,
+    pub rs2_address: cudarc::driver::CudaSlice<u32>,
+    pub rd_address: cudarc::driver::CudaSlice<u32>,
+    pub rd_inc: cudarc::driver::CudaSlice<u64>,
+    pub ram_inc: cudarc::driver::CudaSlice<u64>,
+    pub left_instruction_input: cudarc::driver::CudaSlice<u64>,
+    pub right_instruction_input: cudarc::driver::CudaSlice<u64>,
+    pub left_lookup_operand: cudarc::driver::CudaSlice<u64>,
+    pub right_lookup_operand: cudarc::driver::CudaSlice<u64>,
+    pub lookup_output: cudarc::driver::CudaSlice<u64>,
+    pub product_magnitude: cudarc::driver::CudaSlice<u64>,
+}
+
+impl DeviceAtomColumns {
+    pub fn device_bytes(&self) -> usize {
+        let words = self.flags.len()
+            + self.table_index.len()
+            + self.rs1_address.len()
+            + self.rs2_address.len()
+            + self.rd_address.len();
+        let wide = self.bytecode_pc.len()
+            + self.rd_pre_value.len()
+            + self.rd_inc.len()
+            + self.ram_inc.len()
+            + self.left_instruction_input.len()
+            + self.right_instruction_input.len()
+            + self.left_lookup_operand.len()
+            + self.right_lookup_operand.len()
+            + self.lookup_output.len()
+            + self.product_magnitude.len();
+        words * size_of::<u32>() + wide * size_of::<u64>()
+    }
+}
+
+pub const FLAG_BIT_CIRCUIT_BASE: u32 = 0;
+
+pub const FLAG_BIT_INSTRUCTION_BASE: u32 = 14;
+
+pub const FLAG_BIT_RAF: u32 = 20;
+
+pub const FLAG_BIT_NOOP_ROW: u32 = 21;
+
+pub const FLAG_BIT_NEXT_IS_NOOP: u32 = 22;
+
+pub const FLAG_BIT_RAM_HAMMING: u32 = 23;
+
+pub const FLAG_BIT_SHOULD_BRANCH: u32 = 24;
+
+pub const FLAG_BIT_SHOULD_JUMP: u32 = 25;
+
+pub const FLAG_BIT_PRODUCT_NEGATIVE: u32 = 26;
+
+pub const REGISTER_ADDRESS_ABSENT: u32 = u32::MAX;
+
+pub const TABLE_INDEX_ABSENT: u32 = tables::TABLE_INDEX_ABSENT;
+
+pub use tables::{PACK_CIRCUIT_ORDER, PACK_INSTRUCTION_ORDER};
+
+pub fn circuit_flag_bit(flag: jolt_riscv::CircuitFlags) -> Option<u32> {
+    let slot = PACK_CIRCUIT_ORDER.iter().position(|&entry| entry == flag)?;
+    Some(FLAG_BIT_CIRCUIT_BASE + slot as u32)
+}
+
+pub fn instruction_flag_bit(flag: jolt_riscv::InstructionFlags) -> Option<u32> {
+    let slot = PACK_INSTRUCTION_ORDER
+        .iter()
+        .position(|&entry| entry == flag)?;
+    Some(FLAG_BIT_INSTRUCTION_BASE + slot as u32)
+}
+
+pub struct NarrowColumn {
+    pub column: cudarc::driver::CudaSlice<u32>,
+    pub span: usize,
+    pub first: u64,
+}
+
+pub enum HotSource<'a> {
+    Interleaved(cudarc::driver::CudaView<'a, u64>),
+    Word(cudarc::driver::CudaView<'a, u32>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeviceTraceColumn {
+    MappedPcWord,
+    RemappedRamWord { addresses: usize },
+}

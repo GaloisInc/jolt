@@ -102,12 +102,26 @@ The verifier searches for non-deterministic transitions. We verify that the tran
 
 ## Interpreting Results
 
-When the test suite runs (`cargo test -p z3-verifier -- --nocapture`), it outputs `SAT` or `UNSAT`. A `SAT` result indicates a failure in verification.
+When the test suite runs (`cargo nextest run -p z3-verifier`), it outputs `SAT` or `UNSAT`. A `SAT` result indicates a failure in verification. Each `Solver::check` call carries a fixed timeout and random seed (`Z3_TIMEOUT_MS`, `Z3_RANDOM_SEED` in `lib.rs`); a call that times out fails its test with "Solver failed/timed out, result inconclusive" rather than hanging the run.
+
+## Nightly CI
+
+A scheduled workflow (`.github/workflows/z3-nightly.yml`) runs a subset of the suite nightly against a hermetic Z3 built from pinned vendored source (the crate's `vendored-z3` feature), and files a GitHub issue on failure. Its scope is narrower than the full suite: the non-`#[ignore]`d virtual-sequence proofs plus the per-instruction R1CS determinism checks; the div/rem/mulh sequences (non-terminating under the 64-bit model), memory/atomic/CSR expansions, and registered inlines are not covered. It can also be run on demand via `workflow_dispatch` after changes to `tracer/`, `crates/jolt-program/`, or `z3-verifier/`.
+
+## Bit-Width Scaling (Virtual Sequences)
+
+Some virtual sequences (notably those involving division/remainder or high-half multiplication) can be very slow at full 64-bit bitvector width. The `virtual_sequences` harness supports running the same checks at a scaled-down BitVec width to keep solver runtime manageable while preserving "boundary-condition" structure (e.g., `63 → n-1`, `32 → n/2`, all-ones masks, signed mins).
+
+Set `Z3_VERIFIER_BV_BITS` to a power of two in `[8, 64]` (default: `64`):
+
+```bash
+Z3_VERIFIER_BV_BITS=8 cargo nextest run -p z3-verifier virtual_sequences
+```
 
 ### 1. Correctness Failures (Logic Bugs)
 **Symptom:** `test_..._correctness` fails.
 **Meaning:** The verifier found a concrete set of inputs where Jolt's output disagrees with the Spec.
-**Fix:** Analyze the provided counter-example. If the logic in `symbolic_exec` is correct, the virtual sequence in `jolt-core` is likely buggy.
+**Fix:** Analyze the provided counter-example. If the logic in `symbolic_exec` is correct, the virtual sequence in `jolt-prover-legacy` is likely buggy.
 
 ### 2. Consistency Failures (Under-Constrained Advice)
 **Symptom:** `test_..._consistency` fails.
@@ -117,4 +131,4 @@ When the test suite runs (`cargo test -p z3-verifier -- --nocapture`), it output
 ### 3. R1CS Consistency Failures 
 **Symptom:** `test_...` in `cpu_constraints` fails.
 **Meaning:** The R1CS constraints allow multiple next states for the same input.
-**Fix:** Identify the unconstrained variable (e.g., `rd_write_value`). Add a constraint in `jolt-core/src/zkvm/r1cs/constraints.rs` to force this value to a deterministic state.
+**Fix:** Identify the unconstrained variable (e.g., `rd_write_value`). Add a constraint in `crates/jolt-prover-legacy/src/zkvm/r1cs/constraints.rs` to force this value to a deterministic state.

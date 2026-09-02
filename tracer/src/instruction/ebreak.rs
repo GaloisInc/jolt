@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{declare_riscv_instr, emulator::cpu::Cpu};
 
-use super::{format::format_i::FormatI, RISCVInstruction, RISCVTrace};
+use super::{format::format_i::FormatI, Cycle, Instruction, RISCVInstruction, RISCVTrace};
 
 declare_riscv_instr!(
     name   = EBREAK,
@@ -26,4 +26,8 @@ impl EBREAK {
     }
 }
 
-impl RISCVTrace for EBREAK {}
+impl RISCVTrace for EBREAK {
+    fn trace(&self, cpu: &mut Cpu, trace: Option<&mut Vec<Cycle>>) {
+        super::trace_inline_sequence(&Instruction::from(*self), cpu, trace);
+    }
+}

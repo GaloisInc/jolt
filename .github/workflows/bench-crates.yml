@@ -1,0 +1,114 @@
+name: Benchmark modular crates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: bench-crates-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    name: Criterion benchmarks
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install critcmp
+        run: cargo install critcmp --locked
+
+      # On main push: save baseline
+      - name: Run benchmarks (baseline)
+        if: github.event_name == 'push'
+        run: >
+          cargo bench
+          -p jolt-crypto
+          -p jolt-field
+          -p jolt-poly
+          -p jolt-transcript
+          --bench '*'
+          -- --save-baseline main_run
+
+      - name: Upload baseline
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: criterion-baseline
+          path: target/criterion/
+          retention-days: 30
+
+      # On PR: compare against baseline
+      - name: Download baseline
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v21
+        with:
+          name: criterion-baseline
+          path: target/criterion/
+          branch: main
+          workflow: bench-crates.yml
+          if_no_artifact_found: warn
+
+      - name: Run benchmarks (PR)
+        if: github.event_name == 'pull_request'
+        run: >
+          cargo bench
+          -p jolt-crypto
+          -p jolt-field
+          -p jolt-poly
+          -p jolt-transcript
+          --bench '*'
+          -- --save-baseline pr_run
+
+      - name: Compare benchmarks
+        if: github.event_name == 'pull_request'
+        id: critcmp
+        run: |
+          if ls target/criterion/*/main_run/ &>/dev/null; then
+            OUTPUT=$(critcmp main_run pr_run --threshold 5 2>&1) || true
+            echo "comparison<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$OUTPUT" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post benchmark comparison
+        if: github.event_name == 'pull_request' && steps.critcmp.outputs.comparison != '' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const marker = '<!-- bench-crates -->';
+            const body = `${marker}\n## Benchmark comparison (crates)\n\n\`\`\`\n${process.env.COMPARISON}\n\`\`\``;
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
+        env:
+          COMPARISON: ${{ steps.critcmp.outputs.comparison }}

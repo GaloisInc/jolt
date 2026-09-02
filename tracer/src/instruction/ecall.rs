@@ -2,22 +2,27 @@
 //!
 //! The inline sequence writes mepc, mcause, mtval, and mstatus to their
 //! virtual registers, then jumps unconditionally to the trap handler.
+//!
+//! # Privilege model
+//!
+//! Jolt targets M-mode-only execution (no S/U privilege levels) with no
+//! interrupt hardware. mstatus is written as a constant `0x1800` (MPP=M-mode,
+//! MIE=0, MPIE=0) rather than via read-modify-write. This is correct because:
+//! - The privilege mode is always Machine — MPP is always 3.
+//! - The MIE CSR (0x304) is not in the supported CSR whitelist and cannot be
+//!   accessed by guest code. No interrupt sources exist (no timer, no CLINT,
+//!   no PLIC), so MIE/MPIE bits are unused.
+//! - The ZeroOS trap trampoline restores mstatus via `csrw` before `mret`,
+//!   so the virtual register always holds the correct value across traps.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     declare_riscv_instr,
-    emulator::cpu::{Cpu, PrivilegeMode, Trap, TrapType, Xlen},
-    utils::inline_helpers::InstrAssembler,
-    utils::virtual_registers::VirtualRegisterAllocator,
+    emulator::cpu::{Cpu, PrivilegeMode, Trap, TrapType},
 };
 
-use super::{
-    addi::ADDI, auipc::AUIPC, format::format_i::FormatI, jalr::JALR, slli::SLLI, Cycle,
-    Instruction, RISCVInstruction, RISCVTrace,
-};
-
-const MCAUSE_ECALL_FROM_MMODE: u64 = 11;
+use super::{format::format_i::FormatI, Cycle, Instruction, RISCVInstruction, RISCVTrace};
 
 declare_riscv_instr!(
     name   = ECALL,
@@ -47,42 +52,6 @@ impl ECALL {
 
 impl RISCVTrace for ECALL {
     fn trace(&self, cpu: &mut Cpu, trace: Option<&mut Vec<Cycle>>) {
-        let inline_sequence = self.inline_sequence(&cpu.vr_allocator, cpu.xlen);
-        let mut trace = trace;
-        for instr in inline_sequence {
-            instr.trace(cpu, trace.as_deref_mut());
-        }
-    }
-
-    fn inline_sequence(
-        &self,
-        allocator: &VirtualRegisterAllocator,
-        xlen: Xlen,
-    ) -> Vec<Instruction> {
-        let v_trap_handler_reg = allocator.trap_handler_register();
-        let vr_mepc = allocator.mepc_register();
-        let vr_mcause = allocator.mcause_register();
-        let vr_mtval = allocator.mtval_register();
-        let vr_mstatus = allocator.mstatus_register();
-
-        let mut asm = InstrAssembler::new(self.address, self.is_compressed, xlen, allocator);
-
-        let ecall_addr = allocator.allocate();
-        asm.emit_u::<AUIPC>(*ecall_addr, 0);
-        asm.emit_i::<ADDI>(vr_mepc, *ecall_addr, 0);
-        drop(ecall_addr);
-
-        asm.emit_i::<ADDI>(vr_mcause, 0, MCAUSE_ECALL_FROM_MMODE);
-        asm.emit_i::<ADDI>(vr_mtval, 0, 0);
-
-        // mstatus = 0x1800 (MPP=3 at bits 12:11)
-        let three = allocator.allocate();
-        asm.emit_i::<ADDI>(*three, 0, 3);
-        asm.emit_i::<SLLI>(vr_mstatus, *three, 11);
-        drop(three);
-
-        asm.emit_i::<JALR>(0, v_trap_handler_reg, 0);
-
-        asm.finalize()
+        super::trace_inline_sequence(&Instruction::from(*self), cpu, trace);
     }
 }

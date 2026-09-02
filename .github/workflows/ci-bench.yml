@@ -19,11 +19,11 @@ jobs:
     name: Performance benchmarks
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install RISC-V cross-compiler
         run: sudo apt-get install -y gcc-riscv64-unknown-elf
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: actions/cache@v4 # From: https://github.com/actions/cache/blob/main/examples.md#rust---cargo
+      - uses: actions/cache@v6 # From: https://github.com/actions/cache/blob/main/examples.md#rust---cargo
         with:
           path: |
             ~/.cargo/bin/
@@ -39,7 +39,7 @@ jobs:
         run: rustup component add rust-src
 
       - name: Build and install jolt CLI
-        run: cargo install --path . --locked
+        run: cargo install --path . --locked --force
 
       - name: Run benchmark
         run: |

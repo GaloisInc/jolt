@@ -2,22 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     declare_riscv_instr,
-    emulator::cpu::{Cpu, ReservationWidth, Xlen},
-    utils::inline_helpers::InstrAssembler,
-    utils::virtual_registers::VirtualRegisterAllocator,
+    emulator::cpu::{Cpu, ReservationWidth},
 };
 
-use super::add::ADD;
-use super::addi::ADDI;
 use super::format::format_r::FormatR;
-use super::ld::LD;
-use super::mul::MUL;
-use super::sd::SD;
-use super::sub::SUB;
-use super::virtual_advice::VirtualAdvice;
-use super::virtual_assert_eq::VirtualAssertEQ;
-use super::virtual_assert_lte::VirtualAssertLTE;
-use super::xori::XORI;
 use super::{Cycle, Instruction, RAMWrite, RISCVInstruction, RISCVTrace};
 
 declare_riscv_instr!(
@@ -33,18 +21,20 @@ impl SCD {
         let address = cpu.x[self.operands.rs1 as usize] as u64;
         let value = cpu.x[self.operands.rs2 as usize] as u64;
 
-        if cpu.has_reservation(address, ReservationWidth::Doubleword) {
+        // Per RISC-V A spec, SC.D needs the reservation set to cover the 8
+        // bytes being written. LR.D (8-byte) qualifies; LR.W (4-byte) does not.
+        if cpu.reservation_covers(address, ReservationWidth::Doubleword) {
             let result = cpu.mmu.store_doubleword(address, value);
 
             match result {
                 Ok(memory_write) => {
                     *ram_access = memory_write;
-                    cpu.x[self.operands.rd as usize] = 0;
+                    cpu.write_register(self.operands.rd as usize, 0);
                 }
                 Err(_) => panic!("MMU store error"),
             }
         } else {
-            cpu.x[self.operands.rd as usize] = 1;
+            cpu.write_register(self.operands.rd as usize, 1);
         }
         // RISC-V spec: SC always invalidates the reservation regardless of success/failure
         cpu.clear_reservation();
@@ -54,78 +44,29 @@ impl SCD {
 impl RISCVTrace for SCD {
     fn trace(&self, cpu: &mut Cpu, trace: Option<&mut Vec<Cycle>>) {
         let address = cpu.x[self.operands.rs1 as usize] as u64;
-        let success = cpu.has_reservation(address, ReservationWidth::Doubleword);
+        // See SCD::exec — SC.D needs an 8-byte reservation set.
+        let success = cpu.reservation_covers(address, ReservationWidth::Doubleword);
 
-        let mut inline_sequence = self.inline_sequence(&cpu.vr_allocator, cpu.xlen);
-
-        // VirtualAdvice is at index 0 — advise v_success (1=success, 0=failure)
-        if let Instruction::VirtualAdvice(instr) = &mut inline_sequence[0] {
-            instr.advice = success as u64;
-        }
-
+        // Patch v_success (1=success, 0=failure) into the first VirtualAdvice
+        // in the sequence, on a per-execution copy of the row. Locating it by
+        // type avoids fragility against changes to the sequence's prelude.
         let mut trace = trace;
-        for instr in inline_sequence {
-            instr.trace(cpu, trace.as_deref_mut());
-        }
+        let mut patched = false;
+        cpu.with_cached_inline_sequence(&Instruction::from(*self), |cpu, rows| {
+            for instr in rows {
+                let mut instr = *instr;
+                if !patched {
+                    if let Instruction::VirtualAdvice(v) = &mut instr {
+                        v.advice = success as u64;
+                        patched = true;
+                    }
+                }
+                instr.trace(cpu, trace.as_deref_mut());
+            }
+        });
+        assert!(patched, "SC.D inline sequence must contain a VirtualAdvice");
 
         cpu.clear_reservation();
-    }
-
-    /// SC.D: Store Conditional Doubleword (RV64A only)
-    ///
-    /// Uses VirtualAdvice to support both success and failure paths:
-    /// - Success (v_success=1): reservation must match, store rs2, rd=0
-    /// - Failure (v_success=0): no constraint on reservation, store is no-op, rd=1
-    fn inline_sequence(
-        &self,
-        allocator: &VirtualRegisterAllocator,
-        xlen: Xlen,
-    ) -> Vec<Instruction> {
-        assert_eq!(xlen, Xlen::Bit64, "SC.D is only available in RV64");
-
-        let v_reservation = allocator.reservation_d_register();
-        let v_reservation_w = allocator.reservation_w_register();
-        let mut asm = InstrAssembler::new(self.address, self.is_compressed, xlen, allocator);
-
-        // 0: Prover supplies success flag (1=success, 0=failure)
-        let v_success = allocator.allocate();
-        asm.emit_j::<VirtualAdvice>(*v_success, 0);
-
-        // 1-2: Constrain v_success ∈ {0, 1}
-        let v_one = allocator.allocate();
-        asm.emit_i::<ADDI>(*v_one, 0, 1);
-        asm.emit_b::<VirtualAssertLTE>(*v_success, *v_one, 0);
-        drop(v_one);
-
-        // 4-6: Constrain: success → reservation must match address
-        //   v_success * (v_reservation - rs1) == 0
-        let v_addr_diff = allocator.allocate();
-        asm.emit_r::<SUB>(*v_addr_diff, v_reservation, self.operands.rs1);
-        asm.emit_r::<MUL>(*v_addr_diff, *v_success, *v_addr_diff);
-        asm.emit_b::<VirtualAssertEQ>(*v_addr_diff, 0, 0);
-        drop(v_addr_diff);
-
-        // 7-11: Conditional store (no-op on failure)
-        //   store_val = mem_current + (rs2 - mem_current) * v_success
-        let v_mem = allocator.allocate();
-        asm.emit_ld::<LD>(*v_mem, self.operands.rs1, 0);
-
-        let v_diff = allocator.allocate();
-        asm.emit_r::<SUB>(*v_diff, self.operands.rs2, *v_mem);
-        asm.emit_r::<MUL>(*v_diff, *v_diff, *v_success);
-        asm.emit_r::<ADD>(*v_diff, *v_mem, *v_diff);
-        drop(v_mem);
-
-        asm.emit_s::<SD>(self.operands.rs1, *v_diff, 0);
-        drop(v_diff);
-
-        // 11-13: Clear both reservation registers, set rd = !v_success
-        asm.emit_i::<ADDI>(v_reservation, 0, 0);
-        asm.emit_i::<ADDI>(v_reservation_w, 0, 0);
-        asm.emit_i::<XORI>(self.operands.rd, *v_success, 1);
-        drop(v_success);
-
-        asm.finalize()
     }
 }
 
@@ -269,6 +210,32 @@ mod tests {
             cleared_regs.contains(&33),
             "SC.D inline sequence must clear reservation_d (vr33)"
         );
+    }
+
+    /// SC.D to a non-RAM (I/O) address must be rejected by the
+    /// inline-sequence RAM-range constraint. Same rationale as SC.W.
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_scd_to_io_rejected() {
+        let mut cpu = setup_cpu();
+        let panic_addr = cpu
+            .get_mut_mmu()
+            .jolt_device
+            .as_ref()
+            .unwrap()
+            .memory_layout
+            .panic;
+
+        cpu.x[11] = panic_addr as i64;
+        cpu.x[12] = 0x1234_5678_9ABC_DEF0u64 as i64;
+
+        let decoded = Instruction::decode(encode_scd(13, 11, 12), 0x1000, false).unwrap();
+        let Instruction::SCD(scd) = decoded else {
+            panic!("Expected SCD");
+        };
+
+        let mut trace = Vec::new();
+        scd.trace(&mut cpu, Some(&mut trace));
     }
 
     #[test]

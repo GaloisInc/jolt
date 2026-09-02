@@ -5,11 +5,23 @@ edition = "2021"
 
 [features]
 guest = []
+field-inline = ["jolt/field-inline"]
 
 [dependencies]
 jolt = { package = "jolt-sdk", path = "../../../jolt-sdk", features = [
-    "guest-std",
-    "thread",
-    "stdout"
+  "guest-std",
+  "thread",
+  "stdout",
 ] }
-rayon = "1.10"
+rayon = "1.12"
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "stdlib-guest"
+path = "src/main.rs"
+test = false
+bench = false

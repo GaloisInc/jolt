@@ -1,13 +1,13 @@
 mod sequence_tests {
-    use crate::sdk::Secp256k1Point;
+    use crate::sdk::{decode_glv_sign_word, Secp256k1Point, Secp256k1PointExt};
     use crate::{
-        Secp256k1Fq, Secp256k1Fr, INLINE_OPCODE, SECP256K1_DIVQ_FUNCT3, SECP256K1_DIVR_FUNCT3,
-        SECP256K1_FUNCT7, SECP256K1_MULQ_FUNCT3, SECP256K1_MULR_FUNCT3, SECP256K1_SQUAREQ_FUNCT3,
-        SECP256K1_SQUARER_FUNCT3,
+        Secp256k1Error, Secp256k1Fq, Secp256k1Fr, INLINE_OPCODE, SECP256K1_DIVQ_FUNCT3,
+        SECP256K1_DIVR_FUNCT3, SECP256K1_FUNCT7, SECP256K1_MULQ_FUNCT3, SECP256K1_MULR_FUNCT3,
+        SECP256K1_SQUAREQ_FUNCT3, SECP256K1_SQUARER_FUNCT3,
     };
     use ark_ff::{BigInt, Field, PrimeField};
     use ark_secp256k1::{Fq, Fr};
-    use tracer::emulator::cpu::Xlen;
+    use tracer::emulator::mmu::DRAM_BASE;
     use tracer::utils::inline_test_harness::{InlineMemoryLayout, InlineTestHarness};
 
     fn assert_divq_trace_equiv(a: &[u64; 4], b: &[u64; 4]) {
@@ -21,7 +21,8 @@ mod sequence_tests {
         .0;
         // rs1=input1 (32 bytes), rs2=input2 (32 bytes), rs3=output (32 bytes)
         let layout = InlineMemoryLayout::two_inputs(32, 32, 32);
-        let mut harness = InlineTestHarness::new(layout, Xlen::Bit64);
+
+        let mut harness = InlineTestHarness::new(layout);
         harness.setup_registers();
         harness.load_input64(a);
         harness.load_input2_64(b);
@@ -66,7 +67,8 @@ mod sequence_tests {
         let expected = (arr_to_fq(a) * arr_to_fq(b)).into_bigint().0;
         // rs1=input1 (32 bytes), rs2=input2 (32 bytes), rs3=output (32 bytes)
         let layout = InlineMemoryLayout::two_inputs(32, 32, 32);
-        let mut harness = InlineTestHarness::new(layout, Xlen::Bit64);
+
+        let mut harness = InlineTestHarness::new(layout);
         harness.setup_registers();
         harness.load_input64(a);
         harness.load_input2_64(b);
@@ -114,7 +116,8 @@ mod sequence_tests {
         let expected = (arr_to_fq(a) * arr_to_fq(a)).into_bigint().0;
         // rs1=input1 (32 bytes), rs2=input2 (32 bytes), rs3=output (32 bytes)
         let layout = InlineMemoryLayout::two_inputs(32, 32, 32);
-        let mut harness = InlineTestHarness::new(layout, Xlen::Bit64);
+
+        let mut harness = InlineTestHarness::new(layout);
         harness.setup_registers();
         harness.load_input64(a);
         harness.execute_inline(InlineTestHarness::create_default_instruction(
@@ -157,7 +160,8 @@ mod sequence_tests {
         .0;
         // rs1=input1 (32 bytes), rs2=input2 (32 bytes), rs3=output (32 bytes)
         let layout = InlineMemoryLayout::two_inputs(32, 32, 32);
-        let mut harness = InlineTestHarness::new(layout, Xlen::Bit64);
+
+        let mut harness = InlineTestHarness::new(layout);
         harness.setup_registers();
         harness.load_input64(a);
         harness.load_input2_64(b);
@@ -196,13 +200,66 @@ mod sequence_tests {
         assert_divr_trace_equiv(&a, &b);
     }
 
+    /// Division with the result buffer aliasing the dividend (`rs3 == rs1`).
+    /// The advised quotient must be stored only after every `VirtualAssertEQ`
+    /// against the dividend has run, otherwise the checks compare the stored
+    /// result against itself and any value would be accepted.
+    fn assert_div_trace_equiv_aliased(funct3: u32, a: &[u64; 4], b: &[u64; 4], expected: [u64; 4]) {
+        // rs1 == rs3: dividend and result share one 32-byte region
+        let layout = InlineMemoryLayout {
+            output_base: DRAM_BASE,
+            ..InlineMemoryLayout::two_inputs(32, 32, 32)
+        };
+
+        let mut harness = InlineTestHarness::new(layout);
+        harness.setup_registers();
+        harness.load_input64(a);
+        harness.load_input2_64(b);
+        harness.execute_inline(InlineTestHarness::create_default_instruction(
+            INLINE_OPCODE,
+            funct3,
+            SECP256K1_FUNCT7,
+        ));
+        let result_vec = harness.read_output64(4);
+        let mut result = [0u64; 4];
+        result.copy_from_slice(&result_vec);
+        assert_eq!(result, expected, "aliased div result mismatch");
+    }
+
+    #[test]
+    fn test_secp256k1_div_aliased_dividend_and_result() {
+        let a = [
+            0x123456789ABCDEF0,
+            0x0FEDCBA987654321,
+            0x1111111111111111,
+            0x2222222222222222,
+        ];
+        let b = [
+            0x0FEDCBA987654321,
+            0x123456789ABCDEF0,
+            0x3333333333333333,
+            0x4444444444444444,
+        ];
+
+        let expected_q = (Fq::new(BigInt(b)).inverse().unwrap() * Fq::new(BigInt(a)))
+            .into_bigint()
+            .0;
+        assert_div_trace_equiv_aliased(SECP256K1_DIVQ_FUNCT3, &a, &b, expected_q);
+
+        let expected_r = (Fr::new(BigInt(b)).inverse().unwrap() * Fr::new(BigInt(a)))
+            .into_bigint()
+            .0;
+        assert_div_trace_equiv_aliased(SECP256K1_DIVR_FUNCT3, &a, &b, expected_r);
+    }
+
     fn assert_mulr_trace_equiv(a: &[u64; 4], b: &[u64; 4]) {
         // get expected value
         let arr_to_fr = |arr: &[u64; 4]| Fr::new(BigInt(*arr));
         let expected = (arr_to_fr(a) * arr_to_fr(b)).into_bigint().0;
         // rs1=input1 (32 bytes), rs2=input2 (32 bytes), rs3=output (32 bytes)
         let layout = InlineMemoryLayout::two_inputs(32, 32, 32);
-        let mut harness = InlineTestHarness::new(layout, Xlen::Bit64);
+
+        let mut harness = InlineTestHarness::new(layout);
         harness.setup_registers();
         harness.load_input64(a);
         harness.load_input2_64(b);
@@ -250,7 +307,8 @@ mod sequence_tests {
         let expected = (arr_to_fr(a) * arr_to_fr(a)).into_bigint().0;
         // rs1=input1 (32 bytes), rs2=input2 (32 bytes), rs3=output (32 bytes)
         let layout = InlineMemoryLayout::two_inputs(32, 32, 32);
-        let mut harness = InlineTestHarness::new(layout, Xlen::Bit64);
+
+        let mut harness = InlineTestHarness::new(layout);
         harness.setup_registers();
         harness.load_input64(a);
         harness.execute_inline(InlineTestHarness::create_default_instruction(
@@ -280,6 +338,21 @@ mod sequence_tests {
         assert_squarer_trace_equiv(&a);
         let a = [1u64, 1u64, 1u64, 1u64];
         assert_squarer_trace_equiv(&a);
+    }
+
+    /// `double_and_add` divides by `x_self - x_{self+other}`, which is zero when
+    /// `other == -2*self`. That case must return infinity instead of dividing by
+    /// zero (which panics host advice generation and is unprovable in-guest).
+    #[test]
+    fn test_secp256k1_double_and_add_infinity() {
+        let g = Secp256k1Point::generator();
+        let neg_two_g = g.double().neg();
+
+        let result = g.double_and_add(&neg_two_g);
+        assert!(result.is_infinity(), "2G + (-2G) should be infinity");
+
+        let naive = g.double().add(&neg_two_g);
+        assert!(naive.is_infinity(), "naive 2G + (-2G) should be infinity");
     }
 
     fn u128_point_mul(scalar: u128, point: &Secp256k1Point) -> Secp256k1Point {
@@ -372,7 +445,7 @@ mod sequence_tests {
         .unwrap();
         // check that k * q == k1 * q + k2 * endo_q
         let expected = fr_point_mul(&k, &q);
-        let decomp = Secp256k1Point::decompose_scalar(&k);
+        let decomp = k.glv_decompose();
         let sq = if decomp[0].0 { q.neg() } else { q.clone() };
         let sq_endo = if decomp[1].0 {
             endo_q.neg()
@@ -384,6 +457,16 @@ mod sequence_tests {
         let combined = p1.add(&p2);
         assert_eq!(combined.x().e(), expected.x().e());
         assert_eq!(combined.y().e(), expected.y().e());
+    }
+
+    #[test]
+    fn test_decode_glv_sign_word() {
+        assert!(!decode_glv_sign_word(0).unwrap());
+        assert!(decode_glv_sign_word(1).unwrap());
+        assert!(matches!(
+            decode_glv_sign_word(2),
+            Err(Secp256k1Error::InvalidGlvSignWord(2))
+        ));
     }
 
     #[test]
@@ -421,6 +504,77 @@ mod sequence_tests {
         ])
         .unwrap();
         assert!(crate::sdk::ecdsa_verify(z, r, s, q).is_ok());
+    }
+
+    #[test]
+    fn test_ecdsa_verify_rejects_invalid() {
+        use crate::sdk::{ecdsa_verify, Secp256k1Error};
+
+        let g = Secp256k1Point::generator();
+        let z = Secp256k1Fr::from_u64_arr(&[1, 0, 0, 0]).unwrap();
+        let r = Secp256k1Fr::from_u64_arr(&[1, 0, 0, 0]).unwrap();
+        let s = Secp256k1Fr::from_u64_arr(&[1, 0, 0, 0]).unwrap();
+
+        // Q = infinity → QAtInfinity
+        let result = ecdsa_verify(z.clone(), r.clone(), s.clone(), Secp256k1Point::infinity());
+        assert!(matches!(result, Err(Secp256k1Error::QAtInfinity)));
+
+        // r = 0 → ROrSZero
+        let zero = Secp256k1Fr::from_u64_arr(&[0, 0, 0, 0]).unwrap();
+        let result = ecdsa_verify(z.clone(), zero.clone(), s.clone(), g.clone());
+        assert!(matches!(result, Err(Secp256k1Error::ROrSZero)));
+
+        // s = 0 → ROrSZero
+        let result = ecdsa_verify(z.clone(), r.clone(), zero, g.clone());
+        assert!(matches!(result, Err(Secp256k1Error::ROrSZero)));
+
+        // Non-canonical scalar (z >= n) → InvalidFrElement
+        let bad_z = Secp256k1Fr::from_u64_arr_unchecked(&[u64::MAX; 4]);
+        let result = ecdsa_verify(bad_z, r.clone(), s.clone(), g.clone());
+        assert!(matches!(result, Err(Secp256k1Error::InvalidFrElement)));
+
+        // Non-canonical scalar (r >= n) → InvalidFrElement
+        let bad_r = Secp256k1Fr::from_u64_arr_unchecked(&[u64::MAX; 4]);
+        let result = ecdsa_verify(z.clone(), bad_r, s.clone(), g.clone());
+        assert!(matches!(result, Err(Secp256k1Error::InvalidFrElement)));
+
+        // Non-canonical scalar (s >= n) → InvalidFrElement
+        let bad_s = Secp256k1Fr::from_u64_arr_unchecked(&[u64::MAX; 4]);
+        let result = ecdsa_verify(z.clone(), r.clone(), bad_s, g.clone());
+        assert!(matches!(result, Err(Secp256k1Error::InvalidFrElement)));
+
+        // Non-canonical coordinate (q.x >= p) → InvalidFqElement
+        let bad_x = Secp256k1Fq::from_u64_arr_unchecked(&[u64::MAX; 4]);
+        let bad_q = Secp256k1Point::new_unchecked(bad_x, g.y());
+        let result = ecdsa_verify(z.clone(), r.clone(), s.clone(), bad_q);
+        assert!(matches!(result, Err(Secp256k1Error::InvalidFqElement)));
+
+        // Non-canonical coordinate (q.y >= p) → InvalidFqElement
+        let bad_y = Secp256k1Fq::from_u64_arr_unchecked(&[u64::MAX; 4]);
+        let bad_q = Secp256k1Point::new_unchecked(g.x(), bad_y);
+        let result = ecdsa_verify(z.clone(), r.clone(), s.clone(), bad_q);
+        assert!(matches!(result, Err(Secp256k1Error::InvalidFqElement)));
+
+        // Off-curve point → NotOnCurve
+        // Take a valid x-coordinate and set y to a different valid value
+        let off_curve_y = Secp256k1Fq::from_u64_arr(&[1, 0, 0, 0]).unwrap();
+        let bad_q = Secp256k1Point::new_unchecked(g.x(), off_curve_y);
+        let result = ecdsa_verify(z.clone(), r.clone(), s.clone(), bad_q);
+        assert!(matches!(result, Err(Secp256k1Error::NotOnCurve)));
+    }
+
+    #[test]
+    fn test_ecdsa_verify_rejects_zero_hash_forgery() {
+        use crate::sdk::{ecdsa_verify, Secp256k1Error};
+
+        let q = Secp256k1Point::generator();
+        let z = Secp256k1Fr::from_u64_arr(&[0; 4]).unwrap();
+        let r = Secp256k1Fr::from_u64_arr(&q.x().e()).unwrap();
+        let s = r.clone();
+
+        // With z=0 and r=s=x(Q), the verification equation collapses to R=Q.
+        let result = ecdsa_verify(z, r, s, q);
+        assert!(matches!(result, Err(Secp256k1Error::ZeroMessageHash)));
     }
 
     /// Verify assumptions about Fq and Fr modulus limb structure used in

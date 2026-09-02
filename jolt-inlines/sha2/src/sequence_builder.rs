@@ -1,19 +1,7 @@
-use core::array;
-
-use tracer::{
-    emulator::cpu::Xlen,
-    instruction::{
-        andn::ANDN, format::format_inline::FormatInline, ld::LD, lw::LW, or::OR, sd::SD,
-        slli::SLLI, srli::SRLI, sw::SW, virtual_zero_extend_word::VirtualZeroExtendWord,
-        Instruction,
-    },
-    utils::{
-        inline_helpers::{
-            InstrAssembler,
-            Value::{self, Imm, Reg},
-        },
-        virtual_registers::VirtualRegisterGuard,
-    },
+use jolt_inlines_sdk::host::{
+    ExpandedInstructionSequence, ExpansionError, InlineBuilderExt, InlineExpansionBuilder,
+    InlineOp, InlineOperands, InlineRegister, Kind, NoAdvice, SourceKind,
+    Value::{self, Imm, Reg},
 };
 
 /// SHA-256 initial hash values
@@ -35,37 +23,39 @@ pub const K: [u64; 64] = [
 
 /// Builds assembly sequence for SHA256 compression
 /// Expects A..H to be in RAM at location rs1..rs1+8 (also where output is written)
-/// Expects input words to be in RAM at location rs2..rs2+16
+/// Expects a big-endian input block in RAM at location rs2..rs2+64
 /// Output will be written to rs1..rs1+8
 struct Sha256SequenceBuilder {
-    asm: InstrAssembler,
+    asm: InlineExpansionBuilder,
     /// Round id
     round: i32,
     /// Working state registers A-H
-    state: [VirtualRegisterGuard; 8],
+    state: [InlineRegister; 8],
     /// Message schedule W[0..15] (16 registers)
-    message: [VirtualRegisterGuard; 16],
+    message: [InlineRegister; 16],
     /// Initial state values for final addition (8 registers, only used when !initial)
-    iv: Vec<VirtualRegisterGuard>,
+    iv: Vec<InlineRegister>,
     /// Operands
-    operands: FormatInline,
+    operands: InlineOperands,
     /// Whether this is the initial compression (use BLOCK constants)
     initial: bool,
 }
 
 impl Sha256SequenceBuilder {
-    fn new(asm: InstrAssembler, operands: FormatInline, initial: bool) -> Self {
-        let state = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let message = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let iv = if initial {
-            vec![]
-        } else {
-            (0..8)
-                .map(|_| asm.allocator.allocate_for_inline())
-                .collect()
-        };
-
-        Sha256SequenceBuilder {
+    fn new(
+        mut asm: InlineExpansionBuilder,
+        operands: InlineOperands,
+        initial: bool,
+    ) -> Result<Self, ExpansionError> {
+        let state = asm.allocate_inline_array::<8>()?;
+        let message = asm.allocate_inline_array::<16>()?;
+        let mut iv = Vec::new();
+        if !initial {
+            for _ in 0..8 {
+                iv.push(asm.allocate_for_inline()?);
+            }
+        }
+        Ok(Sha256SequenceBuilder {
             asm,
             round: 0,
             state,
@@ -73,91 +63,56 @@ impl Sha256SequenceBuilder {
             iv,
             operands,
             initial,
-        }
+        })
     }
 
     /// Loads and runs all SHA256 rounds
-    fn build(mut self) -> Vec<Instruction> {
+    fn build(mut self) -> Result<ExpandedInstructionSequence, ExpansionError> {
         if !self.initial {
             // Load initial hash values from memory when using custom IV
             // Load all A-H into initial_state registers (used both for initial values and final addition)
-            if self.asm.xlen == Xlen::Bit32 {
-                (0..8).for_each(|i| {
-                    self.asm
-                        .emit_ld::<LW>(*self.iv[i], self.operands.rs1, (i * 4) as i64)
-                });
-            } else {
-                (0..4).for_each(|i| {
-                    self.load_paired_u32_dirty(
-                        self.operands.rs1,
-                        (i as i64) * 8,
-                        *self.iv[i * 2],
-                        *self.iv[i * 2 + 1],
-                    );
-                });
-            }
-        }
-        // Load input words into message registers
-        if self.asm.xlen == Xlen::Bit32 {
-            (0..16).for_each(|i| {
-                self.asm
-                    .emit_ld::<LW>(*self.message[i], self.operands.rs2, (i * 4) as i64)
-            });
-        } else {
-            (0..8).for_each(|i| {
-                self.load_paired_u32_dirty(
-                    self.operands.rs2,
+            (0..4).for_each(|i| {
+                self.asm.load_paired_u32_dirty(
+                    self.operands.rs1,
                     (i as i64) * 8,
-                    *self.message[i * 2],
-                    *self.message[i * 2 + 1],
+                    *self.iv[i * 2],
+                    *self.iv[i * 2 + 1],
                 );
             });
         }
+        // Load input words into message registers
+        for i in 0..8 {
+            let lo = *self.message[i * 2];
+            let hi = *self.message[i * 2 + 1];
+            self.asm
+                .emit_ld(Kind::LD, lo, self.operands.rs2, (i as i64) * 8);
+            // VirtualRev8W is FormatT (rd, rs1, no rs2): emit an I-shaped row so the
+            // bytecode operands (rs2 = None, imm = 0) match the tracer's format.
+            self.asm.emit_i(Kind::VIRTUAL_REV8_W, lo, lo, 0);
+            self.asm.expand_i(SourceKind::SRLI, hi, lo, 32);
+        }
         // Run 64 rounds
-        (0..64).for_each(|_| self.round());
+        for _ in 0..64 {
+            self.round()?;
+        }
         self.final_add_iv();
         // Store output values to rs1 location
         // Store output A..H in-order using the current VR mapping after all rotations
-        if self.asm.xlen == Xlen::Bit32 {
-            let outs = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
-            for (i, ch) in outs.iter().enumerate() {
-                let src = self.vr(*ch);
-                self.asm
-                    .emit_s::<SW>(self.operands.rs1, src, (i as i64) * 4);
-            }
-        } else {
-            let outs = [('A', 'B'), ('C', 'D'), ('E', 'F'), ('G', 'H')];
-            for (i, (ch1, ch2)) in outs.iter().enumerate() {
-                self.store_paired_u32(
-                    self.operands.rs1,
-                    (i as i64) * 8,
-                    self.vr(*ch1),
-                    self.vr(*ch2),
-                );
-            }
+        let outs = [('A', 'B'), ('C', 'D'), ('E', 'F'), ('G', 'H')];
+        for (i, (ch1, ch2)) in outs.iter().enumerate() {
+            self.asm.store_paired_u32(
+                self.operands.rs1,
+                (i as i64) * 8,
+                self.vr(*ch1),
+                self.vr(*ch2),
+            );
         }
         // Total allocated: 8 (state) + 16 (message) + 8 (initial_state) + 4 (temps per round) = 36
         // The temps are allocated/deallocated per round, but we need to reserve space for them
-        drop(self.state);
-        drop(self.message);
-        drop(self.iv);
-        self.asm.finalize_inline()
-    }
-
-    /// WARNING: leaves junk in upper 32 bits of vr_lo. Safe because SHA-256 ops
-    /// preserve lower 32-bit correctness independent of upper bits.
-    /// Cleanup happens in `store_paired_u32`.
-    fn load_paired_u32_dirty(&mut self, base: u8, offset: i64, vr_lo: u8, vr_hi: u8) {
-        self.asm.emit_ld::<LD>(vr_lo, base, offset);
-        self.asm.emit_i::<SRLI>(vr_hi, vr_lo, 32);
-    }
-
-    /// WARNING: clobbers both input registers.
-    fn store_paired_u32(&mut self, base: u8, offset: i64, vr_lo: u8, vr_hi: u8) {
-        self.asm.emit_i::<VirtualZeroExtendWord>(vr_lo, vr_lo, 0);
-        self.asm.emit_i::<SLLI>(vr_hi, vr_hi, 32);
-        self.asm.emit_r::<OR>(vr_lo, vr_hi, vr_lo);
-        self.asm.emit_s::<SD>(base, vr_lo, offset);
+        self.asm.release_many(self.state);
+        self.asm.release_many(self.message);
+        self.asm.release_iter(self.iv);
+        self.asm.finalize()
     }
 
     /// Adds IV to the final hash value to produce output
@@ -186,17 +141,22 @@ impl Sha256SequenceBuilder {
     }
 
     /// Performs one round of SHA256 compression
-    fn round(&mut self) {
+    fn round(&mut self) -> Result<(), ExpansionError> {
         assert!(self.round < 64);
-        let t1 = self.asm.allocator.allocate_for_inline();
-        let t2 = self.asm.allocator.allocate_for_inline();
-        let ss = self.asm.allocator.allocate_for_inline();
-        let ss2 = self.asm.allocator.allocate_for_inline();
+        let t1 = self.asm.allocate_for_inline()?;
+        let t2 = self.asm.allocate_for_inline()?;
+        let ss = self.asm.allocate_for_inline()?;
+        let ss2 = self.asm.allocate_for_inline()?;
 
         let t1_val = self.compute_t1(*t1, *ss, *ss2);
         let t2_val = self.compute_t2(*t2, *ss, *ss2);
         let old_d = self.vri('D');
         self.apply_round_update(t1_val, t2_val, old_d);
+        self.asm.release(t1);
+        self.asm.release(t2);
+        self.asm.release(ss);
+        self.asm.release(ss2);
+        Ok(())
     }
 
     /// Compute T1 into the provided `t1` register and return it as a Value.
@@ -315,7 +275,7 @@ impl Sha256SequenceBuilder {
         // ANDN computes rs1 & !rs2, so andn(G, E) gives G & !E = !E & G
         match (rs1, rs3) {
             (Reg(r1), Reg(r3)) => {
-                self.asm.emit_r::<ANDN>(rd, r3, r1);
+                self.asm.emit_r(Kind::ANDN, rd, r3, r1);
                 let neg_e_and_g = Reg(rd);
                 self.asm.xor(e_and_f, neg_e_and_g, rd)
             }
@@ -352,8 +312,9 @@ impl Sha256SequenceBuilder {
 
     /// sigma_0 for word computation: σ₀(x) = ROTR⁷(x) ⊕ ROTR¹⁸(x) ⊕ SHR³(x)
     fn sha_word_sigma_0(&mut self, rs1: u8, rd: u8, ss: u8) {
-        self.asm.rotri_xor_rotri32(Reg(rs1), 7, 18, rd, ss);
-        self.asm.srli(Reg(rs1), 3, ss);
+        self.asm.rotri32(Reg(rs1), 11, ss);
+        self.asm.emit_r(Kind::VirtualXORROTW7, rd, rs1, ss);
+        self.word_shr(rs1, 3, ss);
         self.asm.xor(Reg(rd), Reg(ss), rd);
     }
 
@@ -361,29 +322,49 @@ impl Sha256SequenceBuilder {
     fn sha_word_sigma_1(&mut self, rs1: u8, rd: u8, ss: u8) {
         // We don't need to do Imm shenanigans here since words are always in registers
         self.asm.rotri_xor_rotri32(Reg(rs1), 17, 19, rd, ss);
-        self.asm.srli(Reg(rs1), 10, ss);
+        self.word_shr(rs1, 10, ss);
         self.asm.xor(Reg(rd), Reg(ss), rd);
+    }
+
+    fn word_shr(&mut self, rs1: u8, shift: u32, rd: u8) {
+        let rotated = self.asm.rotri32(Reg(rs1), shift, rd);
+        let mask = (1u64 << (32 - shift)) - 1;
+        self.asm.and(rotated, Imm(mask), rd);
     }
 }
 
-// Virtual instructions builder for sha256
-pub fn sha2_inline_sequence_builder(
-    asm: InstrAssembler,
-    operands: FormatInline,
-) -> Vec<Instruction> {
-    let builder = Sha256SequenceBuilder::new(
-        asm, operands, false, // not initial - uses custom IV from rs1
-    );
-    builder.build()
+pub struct Sha256Compression;
+
+impl InlineOp for Sha256Compression {
+    type Advice = NoAdvice;
+
+    const OPCODE: u32 = crate::INLINE_OPCODE;
+    const FUNCT3: u32 = crate::SHA256_FUNCT3;
+    const FUNCT7: u32 = crate::SHA256_FUNCT7;
+    const NAME: &'static str = crate::SHA256_NAME;
+
+    fn build_sequence(
+        asm: InlineExpansionBuilder,
+        operands: InlineOperands,
+    ) -> Result<ExpandedInstructionSequence, ExpansionError> {
+        Sha256SequenceBuilder::new(asm, operands, false)?.build()
+    }
 }
 
-// Virtual instructions builder for sha256_init
-pub fn sha2_init_inline_sequence_builder(
-    asm: InstrAssembler,
-    operands: FormatInline,
-) -> Vec<Instruction> {
-    let builder = Sha256SequenceBuilder::new(
-        asm, operands, true, // initial - uses BLOCK constants
-    );
-    builder.build()
+pub struct Sha256CompressionInitial;
+
+impl InlineOp for Sha256CompressionInitial {
+    type Advice = NoAdvice;
+
+    const OPCODE: u32 = crate::INLINE_OPCODE;
+    const FUNCT3: u32 = crate::SHA256_INIT_FUNCT3;
+    const FUNCT7: u32 = crate::SHA256_INIT_FUNCT7;
+    const NAME: &'static str = crate::SHA256_INIT_NAME;
+
+    fn build_sequence(
+        asm: InlineExpansionBuilder,
+        operands: InlineOperands,
+    ) -> Result<ExpandedInstructionSequence, ExpansionError> {
+        Sha256SequenceBuilder::new(asm, operands, true)?.build()
+    }
 }

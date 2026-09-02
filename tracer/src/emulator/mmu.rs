@@ -2,12 +2,13 @@
 /// is the address in main memory.
 pub const DRAM_BASE: u64 = RAM_START_ADDRESS;
 
+use crate::emulator::decode_cache::DecodeCache;
 use crate::emulator::memory::Memory;
 use crate::instruction::{RAMRead, RAMWrite};
 use common::constants::{RAM_START_ADDRESS, STACK_CANARY_SIZE};
 use common::jolt_device::JoltDevice;
 
-use super::cpu::{get_privilege_mode, PrivilegeMode, Trap, TrapType, Xlen};
+use super::cpu::{get_privilege_mode, PrivilegeMode, Trap, TrapType};
 use super::terminal::Terminal;
 
 /// Emulates Memory Management Unit. It holds the Main memory and peripheral
@@ -17,12 +18,14 @@ use super::terminal::Terminal;
 /// @TODO: Memory protection is not implemented yet. We should support.
 #[derive(Clone, Debug)]
 pub struct Mmu {
-    clock: u64,
-    xlen: Xlen,
     ppn: u64,
     addressing_mode: AddressingMode,
     privilege_mode: PrivilegeMode,
     pub memory: MemoryWrapper,
+
+    /// Pre-decoded instruction cache. Lives on the Mmu so the store paths can
+    /// invalidate it directly when the executable range is written.
+    pub decode_cache: DecodeCache,
 
     pub jolt_device: Option<JoltDevice>,
 
@@ -34,7 +37,6 @@ pub struct Mmu {
 #[derive(Clone, Debug, Copy)]
 pub enum AddressingMode {
     None,
-    SV32,
     SV39,
     SV48, // @TODO: Implement
 }
@@ -48,7 +50,6 @@ enum MemoryAccessType {
 fn _get_addressing_mode_name(mode: &AddressingMode) -> &'static str {
     match mode {
         AddressingMode::None => "None",
-        AddressingMode::SV32 => "SV32",
         AddressingMode::SV39 => "SV39",
         AddressingMode::SV48 => "SV48",
     }
@@ -61,25 +62,22 @@ impl Mmu {
     /// * `xlen`
     /// * `terminal`
     /// * `tracer`
-    pub fn new(xlen: Xlen, _terminal: Box<dyn Terminal>) -> Self {
+    pub fn new(_terminal: Box<dyn Terminal>) -> Self {
         Mmu {
-            clock: 0,
-            xlen,
             ppn: 0,
             addressing_mode: AddressingMode::None,
             privilege_mode: PrivilegeMode::Machine,
             memory: MemoryWrapper::new(),
+            decode_cache: DecodeCache::empty(),
             jolt_device: None,
             mstatus: 0,
         }
     }
 
-    /// Updates XLEN, 32-bit or 64-bit
-    ///
-    /// # Arguments
-    /// * `xlen`
-    pub fn update_xlen(&mut self, xlen: Xlen) {
-        self.xlen = xlen;
+    /// Set the executable address range covered by the pre-decoded
+    /// instruction cache.
+    pub fn init_decode_cache(&mut self, text_base: u64, text_end: u64) {
+        self.decode_cache.init(text_base, text_end);
     }
 
     /// Initializes Main memory. This method is expected to be called only once.
@@ -88,11 +86,6 @@ impl Mmu {
     /// * `capacity`
     pub fn init_memory(&mut self, capacity: u64) {
         self.memory.init(capacity);
-    }
-
-    /// Runs one cycle of MMU and peripheral devices.
-    pub fn tick(&mut self) {
-        self.clock = self.clock.wrapping_add(1);
     }
 
     /// Updates addressing mode
@@ -129,10 +122,7 @@ impl Mmu {
     }
 
     fn get_effective_address(&self, address: u64) -> u64 {
-        match self.xlen {
-            Xlen::Bit32 => address & 0xffffffff,
-            Xlen::Bit64 => address,
-        }
+        address
     }
 
     #[inline]
@@ -207,11 +197,15 @@ impl Mmu {
                 // attempt to write to the stack vs heap, but they're trying their best
                 assert!(
                     ea <= layout.stack_end || ea > layout.stack_end + STACK_CANARY_SIZE,
-                    "Stack overflow: Triggered Stack Canary. Attempted to {verb} 0x{ea:X}.\n{layout:#?}",
+                    "Stack overflow: attempted to {verb} 0x{ea:X}, which is in the stack canary region. \
+                    Increase stack_size in MemoryConfig (currently {} bytes).",
+                    layout.stack_size,
                 );
                 assert!(
                     ea < layout.heap_end,
-                    "Heap overflow: Attempted to {verb} 0x{ea:X}. Heap too small.\n{layout:#?}",
+                    "Heap overflow: attempted to {verb} 0x{ea:X}, which is beyond the heap. \
+                    Increase heap_size in MemoryConfig (currently {} bytes).",
+                    layout.heap_size,
                 );
             } else {
                 // allow reads across the whole designated memory region as long as the address is valid
@@ -527,33 +521,28 @@ impl Mmu {
     /// state is used in Jolt to construct the witnesses in `read_write_memory.rs`.
     fn trace_load(&mut self, effective_address: u64) -> RAMRead {
         let word_address = (effective_address >> 2) << 2;
-        let bytes = match self.xlen {
-            Xlen::Bit32 => 4,
-            Xlen::Bit64 => 8,
-        };
         if word_address < DRAM_BASE {
-            let mut value_bytes = [0u8; 8];
-            for i in 0..bytes {
-                value_bytes[i as usize] = self
-                    .jolt_device
-                    .as_ref()
-                    .expect("JoltDevice not set")
-                    .load(word_address + i);
-            }
             RAMRead {
                 address: word_address,
-                value: u64::from_le_bytes(value_bytes),
+                value: self.device_doubleword(word_address),
             }
         } else {
-            let mut value_bytes = [0u8; 8];
-            for i in 0..bytes {
-                value_bytes[i as usize] = self.memory.read_byte(word_address + i);
-            }
             RAMRead {
                 address: word_address,
-                value: u64::from_le_bytes(value_bytes),
+                value: self.memory.read_doubleword(word_address),
             }
         }
+    }
+
+    /// Read a (4-byte-aligned) doubleword from the memory-mapped device region.
+    #[expect(clippy::expect_used)]
+    fn device_doubleword(&self, address: u64) -> u64 {
+        let jolt_device = self.jolt_device.as_ref().expect("JoltDevice not set");
+        let mut value_bytes = [0u8; 8];
+        for (i, byte) in value_bytes.iter_mut().enumerate() {
+            *byte = jolt_device.load(address + i as u64);
+        }
+        u64::from_le_bytes(value_bytes)
     }
 
     /// Records the state of the memory word containing the accessed byte
@@ -561,28 +550,12 @@ impl Mmu {
     /// construct the witnesses in `read_write_memory.rs`.
     fn trace_store_byte(&mut self, effective_address: u64, value: u64) -> RAMWrite {
         self.assert_effective_store_address(effective_address);
-        let bytes = match self.xlen {
-            Xlen::Bit32 => 4,
-            Xlen::Bit64 => 8,
-        };
         let word_address = (effective_address >> 2) << 2;
 
         let pre_value = if effective_address < DRAM_BASE {
-            let mut pre_value_bytes = [0u8; 8];
-            for i in 0..bytes {
-                pre_value_bytes[i as usize] = self
-                    .jolt_device
-                    .as_ref()
-                    .expect("JoltDevice not set")
-                    .load(word_address + i);
-            }
-            u64::from_le_bytes(pre_value_bytes)
+            self.device_doubleword(word_address)
         } else {
-            let mut pre_value_bytes = [0u8; 8];
-            for i in 0..bytes {
-                pre_value_bytes[i as usize] = self.memory.read_byte(word_address + i);
-            }
-            u64::from_le_bytes(pre_value_bytes)
+            self.memory.read_doubleword(word_address)
         };
 
         // Mask the value into the word
@@ -606,28 +579,12 @@ impl Mmu {
     /// construct the witnesses in `read_write_memory.rs`.
     fn trace_store_halfword(&mut self, effective_address: u64, value: u64) -> RAMWrite {
         self.assert_effective_store_address(effective_address);
-        let bytes = match self.xlen {
-            Xlen::Bit32 => 4,
-            Xlen::Bit64 => 8,
-        };
         let word_address = (effective_address >> 2) << 2;
 
         let pre_value = if effective_address < DRAM_BASE {
-            let mut pre_value_bytes = [0u8; 8];
-            for i in 0..bytes {
-                pre_value_bytes[i as usize] = self
-                    .jolt_device
-                    .as_ref()
-                    .expect("JoltDevice not set")
-                    .load(word_address + i);
-            }
-            u64::from_le_bytes(pre_value_bytes)
+            self.device_doubleword(word_address)
         } else {
-            let mut pre_value_bytes = [0u8; 8];
-            for i in 0..bytes {
-                pre_value_bytes[i as usize] = self.memory.read_byte(word_address + i);
-            }
-            u64::from_le_bytes(pre_value_bytes)
+            self.memory.read_doubleword(word_address)
         };
 
         // Mask the value into the word
@@ -651,37 +608,16 @@ impl Mmu {
     /// in `read_write_memory.rs`.
     fn trace_store(&mut self, effective_address: u64, value: u64) -> RAMWrite {
         self.assert_effective_store_address(effective_address);
-        let bytes = match self.xlen {
-            Xlen::Bit32 => 4,
-            Xlen::Bit64 => 8,
-        };
 
-        if effective_address < DRAM_BASE {
-            let mut pre_value_bytes = [0u8; 8];
-            for i in 0..bytes {
-                pre_value_bytes[i as usize] = self
-                    .jolt_device
-                    .as_ref()
-                    .expect("JoltDevice not set")
-                    .load(effective_address + i);
-            }
-            let pre_value = u64::from_le_bytes(pre_value_bytes);
-            RAMWrite {
-                address: effective_address,
-                pre_value,
-                post_value: value,
-            }
+        let pre_value = if effective_address < DRAM_BASE {
+            self.device_doubleword(effective_address)
         } else {
-            let mut pre_value_bytes = [0u8; 8];
-            for i in 0..bytes {
-                pre_value_bytes[i as usize] = self.memory.read_byte(effective_address + i);
-            }
-            let pre_value = u64::from_le_bytes(pre_value_bytes);
-            RAMWrite {
-                address: effective_address,
-                pre_value,
-                post_value: value,
-            }
+            self.memory.read_doubleword(effective_address)
+        };
+        RAMWrite {
+            address: effective_address,
+            pre_value,
+            post_value: value,
         }
     }
 
@@ -768,6 +704,7 @@ impl Mmu {
     /// * `value` data written
     pub fn store_raw(&mut self, p_address: u64, value: u8) {
         let effective_address = self.get_effective_address(p_address);
+        self.decode_cache.invalidate_store(effective_address, 1);
         // @TODO: Mapping should be configurable with dtb
         match effective_address >= DRAM_BASE {
             true => {
@@ -817,6 +754,7 @@ impl Mmu {
     /// * `value` data written
     fn store_halfword_raw(&mut self, p_address: u64, value: u16) {
         let effective_address = self.get_effective_address(p_address);
+        self.decode_cache.invalidate_store(effective_address, 2);
         match effective_address >= DRAM_BASE
             && effective_address.wrapping_add(1) > effective_address
         {
@@ -844,6 +782,7 @@ impl Mmu {
     /// * `value` data written
     fn store_word_raw(&mut self, p_address: u64, value: u32) {
         let effective_address = self.get_effective_address(p_address);
+        self.decode_cache.invalidate_store(effective_address, 4);
         match effective_address >= DRAM_BASE
             && effective_address.wrapping_add(3) > effective_address
         {
@@ -871,6 +810,7 @@ impl Mmu {
     /// * `value` data written
     fn store_doubleword_raw(&mut self, p_address: u64, value: u64) {
         let effective_address = self.get_effective_address(p_address);
+        self.decode_cache.invalidate_store(effective_address, 8);
         match effective_address >= DRAM_BASE
             && effective_address.wrapping_add(7) > effective_address
         {
@@ -898,37 +838,8 @@ impl Mmu {
         let address = self.get_effective_address(v_address);
         let p_address = match self.addressing_mode {
             AddressingMode::None => Ok(address),
-            AddressingMode::SV32 => match self.privilege_mode {
-                // @TODO: Optimize
-                PrivilegeMode::Machine => match access_type {
-                    MemoryAccessType::Execute => Ok(address),
-                    // @TODO: Remove magic number
-                    _ => match (self.mstatus >> 17) & 1 {
-                        0 => Ok(address),
-                        _ => {
-                            let privilege_mode = get_privilege_mode((self.mstatus >> 11) & 3);
-                            match privilege_mode {
-                                PrivilegeMode::Machine => Ok(address),
-                                _ => {
-                                    let current_privilege_mode = self.privilege_mode;
-                                    self.update_privilege_mode(privilege_mode);
-                                    let result = self.translate_address(v_address, access_type);
-                                    self.update_privilege_mode(current_privilege_mode);
-                                    result
-                                }
-                            }
-                        }
-                    },
-                },
-                PrivilegeMode::User | PrivilegeMode::Supervisor => {
-                    let vpns = [(address >> 12) & 0x3ff, (address >> 22) & 0x3ff];
-                    self.traverse_page(address, 2 - 1, self.ppn, &vpns, access_type)
-                }
-                _ => Ok(address),
-            },
             AddressingMode::SV39 => match self.privilege_mode {
                 // @TODO: Optimize
-                // @TODO: Remove duplicated code with SV32
                 PrivilegeMode::Machine => match access_type {
                     MemoryAccessType::Execute => Ok(address),
                     // @TODO: Remove magic number
@@ -975,21 +886,11 @@ impl Mmu {
         access_type: &MemoryAccessType,
     ) -> Result<u64, ()> {
         let pagesize = 4096;
-        let ptesize = match self.addressing_mode {
-            AddressingMode::SV32 => 4,
-            _ => 8,
-        };
+        let ptesize = 8;
         let pte_address = parent_ppn * pagesize + vpns[level as usize] * ptesize;
-        let pte = match self.addressing_mode {
-            AddressingMode::SV32 => self.load_word_raw(pte_address) as u64,
-            _ => self.load_doubleword_raw(pte_address),
-        };
-        let ppn = match self.addressing_mode {
-            AddressingMode::SV32 => (pte >> 10) & 0x3fffff,
-            _ => (pte >> 10) & 0xfffffffffff,
-        };
+        let pte = self.load_doubleword_raw(pte_address);
+        let ppn = (pte >> 10) & 0xfffffffffff;
         let ppns = match self.addressing_mode {
-            AddressingMode::SV32 => [(pte >> 10) & 0x3ff, (pte >> 20) & 0xfff, 0 /*dummy*/],
             AddressingMode::SV39 => [
                 (pte >> 10) & 0x1ff,
                 (pte >> 19) & 0x1ff,
@@ -1034,10 +935,7 @@ impl Mmu {
                     MemoryAccessType::Write => 1 << 7,
                     _ => 0,
                 });
-            match self.addressing_mode {
-                AddressingMode::SV32 => self.store_word_raw(pte_address, new_pte as u32),
-                _ => self.store_doubleword_raw(pte_address, new_pte),
-            };
+            self.store_doubleword_raw(pte_address, new_pte);
         }
 
         match access_type {
@@ -1060,33 +958,21 @@ impl Mmu {
 
         let offset = v_address & 0xfff; // [11:0]
                                         // @TODO: Optimize
-        let p_address = match self.addressing_mode {
-            AddressingMode::SV32 => match level {
-                1 => {
-                    if ppns[0] != 0 {
-                        return Err(());
-                    }
-                    (ppns[1] << 22) | (vpns[0] << 12) | offset
+        let p_address = match level {
+            2 => {
+                if ppns[1] != 0 || ppns[0] != 0 {
+                    return Err(());
                 }
-                0 => (ppn << 12) | offset,
-                _ => panic!(), // Shouldn't happen
-            },
-            _ => match level {
-                2 => {
-                    if ppns[1] != 0 || ppns[0] != 0 {
-                        return Err(());
-                    }
-                    (ppns[2] << 30) | (vpns[1] << 21) | (vpns[0] << 12) | offset
+                (ppns[2] << 30) | (vpns[1] << 21) | (vpns[0] << 12) | offset
+            }
+            1 => {
+                if ppns[0] != 0 {
+                    return Err(());
                 }
-                1 => {
-                    if ppns[0] != 0 {
-                        return Err(());
-                    }
-                    (ppns[2] << 30) | (ppns[1] << 21) | (vpns[0] << 12) | offset
-                }
-                0 => (ppn << 12) | offset,
-                _ => panic!(), // Shouldn't happen
-            },
+                (ppns[2] << 30) | (ppns[1] << 21) | (vpns[0] << 12) | offset
+            }
+            0 => (ppn << 12) | offset,
+            _ => panic!(), // Shouldn't happen
         };
 
         // println!("PA:{:X}", p_address);
@@ -1097,18 +983,56 @@ impl Mmu {
 impl Mmu {
     pub fn save_state_with_empty_memory(&self) -> Mmu {
         Mmu {
-            clock: self.clock,
-            xlen: self.xlen,
             ppn: self.ppn,
             addressing_mode: self.addressing_mode,
             privilege_mode: self.privilege_mode,
             memory: MemoryWrapper {
                 memory: Memory::empty(),
             },
+            decode_cache: self.decode_cache.snapshot_with_empty_entries(),
             jolt_device: self.jolt_device.clone(),
             mstatus: self.mstatus,
         }
     }
+
+    /// Capture chunk-replay MMU translation state. Static for Jolt guests
+    /// (no virtual addressing) but tiny; the destructure is exhaustive so
+    /// new fields must be classified.
+    pub(crate) fn capture_chunk_state(&self) -> ChunkMmuState {
+        let Mmu {
+            ppn,
+            addressing_mode,
+            privilege_mode,
+            // Snapshotted separately (pooled image / checkpoint layer).
+            memory: _,
+            decode_cache: _,
+            jolt_device: _,
+            mstatus,
+        } = self;
+        ChunkMmuState {
+            ppn: *ppn,
+            addressing_mode: *addressing_mode,
+            privilege_mode: *privilege_mode,
+            mstatus: *mstatus,
+        }
+    }
+
+    /// Counterpart of [`Mmu::capture_chunk_state`].
+    pub(crate) fn install_chunk_state(&mut self, state: &ChunkMmuState) {
+        self.ppn = state.ppn;
+        self.addressing_mode = state.addressing_mode;
+        self.privilege_mode = state.privilege_mode;
+        self.mstatus = state.mstatus;
+    }
+}
+
+/// MMU translation state captured with a chunk checkpoint.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ChunkMmuState {
+    ppn: u64,
+    addressing_mode: AddressingMode,
+    privilege_mode: PrivilegeMode,
+    mstatus: u64,
 }
 
 /// [`Memory`](../memory/struct.Memory.html) wrapper. Converts physical address to the one in memory
@@ -1214,7 +1138,7 @@ mod test_mmu {
 
     fn setup_mmu() -> Mmu {
         let terminal = Box::new(DummyTerminal::default());
-        let mut mmu = Mmu::new(Xlen::Bit64, terminal);
+        let mut mmu = Mmu::new(terminal);
         let memory_config = MemoryConfig {
             program_size: Some(1024),
             ..Default::default()
@@ -1242,7 +1166,7 @@ mod test_mmu {
     }
 
     #[test]
-    #[should_panic(expected = "Stack Canary")]
+    #[should_panic(expected = "Stack overflow")]
     fn test_stack_overflow() {
         let mut mmu = setup_mmu();
 

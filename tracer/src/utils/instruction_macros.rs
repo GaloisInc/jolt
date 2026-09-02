@@ -5,8 +5,11 @@ macro_rules! declare_riscv_instr {
       mask    = $mask:expr,
       match   = $match_:expr,
       format  = $format:ty,
-      ram     = $ram:ty
+      ram     = $ram:ty $(,)?
   ) => {
+        declare_riscv_instr!(@inner $name, $mask, $match_, $format, $ram);
+    };
+    (@inner $name:ident, $mask:expr, $match_:expr, $format:ty, $ram:ty) => {
         #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
         pub struct $name {
             pub address: u64,
@@ -26,6 +29,13 @@ macro_rules! declare_riscv_instr {
 
             fn operands(&self) -> &Self::Format {
                 &self.operands
+            }
+
+            fn source_kind(&self) -> ::jolt_riscv::SourceInstructionKind {
+                match ::jolt_riscv::SourceInstructionKind::from_name(stringify!($name)) {
+                    Some(kind) => kind,
+                    None => unreachable!("unknown tracer instruction source kind"),
+                }
             }
 
             fn new(word: u32, address: u64, validate: bool, compressed: bool) -> Self {
@@ -69,28 +79,17 @@ macro_rules! declare_riscv_instr {
             }
         }
 
-        impl From<$crate::instruction::NormalizedInstruction> for $name {
-            fn from(ni: $crate::instruction::NormalizedInstruction) -> Self {
+        impl From<$crate::instruction::SourceInstructionRow> for $name {
+            fn from(row: $crate::instruction::SourceInstructionRow) -> Self {
                 Self {
-                    address: ni.address as u64,
-                    operands: ni.operands.into(),
+                    address: row.address as u64,
+                    operands: row.operands.into(),
                     virtual_sequence_remaining: None,
                     is_first_in_sequence: false,
-                    is_compressed: ni.is_compressed,
+                    is_compressed: row.is_compressed,
                 }
             }
         }
 
-        impl From<$name> for $crate::instruction::NormalizedInstruction {
-            fn from(instr: $name) -> $crate::instruction::NormalizedInstruction {
-                $crate::instruction::NormalizedInstruction {
-                    address: instr.address as usize,
-                    operands: instr.operands.into(),
-                    is_compressed: instr.is_compressed,
-                    virtual_sequence_remaining: instr.virtual_sequence_remaining,
-                    is_first_in_sequence: instr.is_first_in_sequence,
-                }
-            }
-        }
     };
 }
