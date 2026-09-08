@@ -155,6 +155,7 @@ pub struct CudaKernelContext {
     msm_g2_frobenius: CudaFunction,
     msm_g2_axpy_glv: CudaFunction,
     msm_shared_scalar_rows_glv: CudaFunction,
+    msm_shared_scalar_windows: CudaFunction,
     msm_glv_decompose_2d: CudaFunction,
     msm_g1_endomorphism: CudaFunction,
     msm_jacobian_z: CudaFunction,
@@ -352,6 +353,7 @@ impl CudaKernelContext {
             msm_g2_axpy_glv: module.load_function("msm_g2_axpy_glv_kernel")?,
             msm_shared_scalar_rows_glv: module
                 .load_function("msm_shared_scalar_rows_glv_kernel")?,
+            msm_shared_scalar_windows: module.load_function("msm_shared_scalar_windows_kernel")?,
             msm_glv_decompose_2d: module.load_function("msm_glv_decompose_2d_kernel")?,
             msm_g1_endomorphism: module.load_function("msm_g1_endomorphism_kernel")?,
             msm_jacobian_z: module.load_function("msm_jacobian_z_kernel")?,
@@ -912,6 +914,10 @@ impl CudaKernelContext {
 
     pub(crate) const fn msm_shared_scalar_rows_glv(&self) -> &CudaFunction {
         &self.msm_shared_scalar_rows_glv
+    }
+
+    pub(crate) const fn msm_shared_scalar_windows(&self) -> &CudaFunction {
+        &self.msm_shared_scalar_windows
     }
 
     pub(crate) const fn msm_glv_decompose_2d(&self) -> &CudaFunction {

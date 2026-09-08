@@ -1019,6 +1019,9 @@ impl CudaKernelContext {
         let mut output = self.alloc_u64(rows * 3 * FQ_LIMBS)?;
 
         let (split, signs) = self.glv_decompose_2d(&device_scalars, terms)?;
+        if self.msm_rows_shared_windows(&device_bases, &split, &signs, rows, &mut output)? {
+            return Ok(unflatten_jacobian(&self.download_u64(&output)?));
+        }
         let device_signs = self.upload_u8_slice(&signs)?;
         let beta = self.upload_u64_slice(&glv_endomorphism_coefficient())?;
 
@@ -1063,6 +1066,104 @@ impl CudaKernelContext {
         self.stream().synchronize()?;
 
         Ok(unflatten_jacobian(&self.download_u64(&output)?))
+    }
+
+    fn msm_rows_shared_windows(
+        &self,
+        bases: &CudaSlice<u64>,
+        scalars: &CudaSlice<u64>,
+        signs: &[u8],
+        rows: usize,
+        output: &mut CudaSlice<u64>,
+    ) -> Result<bool, CudaError> {
+        const WINDOW_BITS: usize = 4;
+        const WINDOWS: usize = GLV_SCALAR_BITS.div_ceil(WINDOW_BITS);
+        const BUCKETS: usize = 1 << WINDOW_BITS;
+        let terms = signs.len() / 2;
+        if rows < 128 || terms < 8 {
+            return Ok(false);
+        }
+        let point_bytes = 3 * FQ_LIMBS * size_of::<u64>();
+        let bytes = signs
+            .len()
+            .saturating_add(WINDOWS)
+            .saturating_mul(rows)
+            .saturating_mul(point_bytes)
+            .saturating_add(
+                signs
+                    .len()
+                    .saturating_mul(WINDOWS)
+                    .saturating_add(WINDOWS * BUCKETS + 1)
+                    .saturating_mul(size_of::<u32>()),
+            );
+        let (free, _) = self.stream().context().mem_get_info()?;
+        if bytes > (free / 8).min(MAX_G1_BATCHED_WINDOW_BYTES) {
+            return Ok(false);
+        }
+
+        // The coefficients are shared by every row, so build one small signed
+        // bucket schedule and reuse it across the entire point matrix.
+        let coefficients = self.download_u64(scalars)?;
+        let mut indices = Vec::with_capacity(signs.len() * WINDOWS);
+        let mut offsets = Vec::with_capacity(WINDOWS * BUCKETS + 1);
+        offsets.push(0);
+        for window in 0..WINDOWS {
+            for bucket in 0..BUCKETS {
+                if bucket != 0 {
+                    for (term, (limbs, &sign)) in
+                        coefficients.chunks_exact(FQ_LIMBS).zip(signs).enumerate()
+                    {
+                        let magnitude = u128::from(limbs[0]) | (u128::from(limbs[1]) << 64);
+                        let digit = (magnitude >> (window * WINDOW_BITS)) & (BUCKETS - 1) as u128;
+                        if digit == bucket as u128 {
+                            indices.push(Self::count_of(term)? | (u32::from(sign) << 31));
+                        }
+                    }
+                }
+                offsets.push(Self::count_of(indices.len())?);
+            }
+        }
+        let indices = self.upload_u32_slice(&indices)?;
+        let offsets = self.upload_u32_slice(&offsets)?;
+        let mapped = self.g1_endomorphism_span(bases, 0, rows * terms)?;
+        let mut window_points = self.alloc_u64(WINDOWS * rows * 3 * FQ_LIMBS)?;
+        let rows_arg = Self::count_of(rows)?;
+        let buckets_arg = BUCKETS as u32;
+        let windows_arg = WINDOWS as u32;
+        let bits_arg = WINDOW_BITS as u32;
+        let mut builder = self
+            .stream()
+            .launch_builder(self.msm_shared_scalar_windows());
+        let _ = builder.arg(&mapped);
+        let _ = builder.arg(&indices);
+        let _ = builder.arg(&offsets);
+        let _ = builder.arg(&rows_arg);
+        let _ = builder.arg(&buckets_arg);
+        let _ = builder.arg(&mut window_points);
+        // SAFETY: the host schedule partitions indices into WINDOWS * BUCKETS
+        // ranges; each masked term is below 2 * terms. The mapped matrix holds
+        // those terms in term-major order, with rows points per term. Each
+        // (window, row) thread writes a distinct window_points slot. Padded row
+        // threads return before any access; there are no block collectives.
+        let _ = unsafe {
+            builder.launch(LaunchConfig {
+                grid_dim: (rows_arg.div_ceil(POINT_BLOCK), windows_arg, 1),
+                block_dim: (POINT_BLOCK, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }?;
+        let mut builder = self.stream().launch_builder(self.msm_window_fold());
+        let _ = builder.arg(&window_points);
+        let _ = builder.arg(&rows_arg);
+        let _ = builder.arg(&windows_arg);
+        let _ = builder.arg(&bits_arg);
+        let _ = builder.arg(output);
+        // SAFETY: thread row < rows reads one point per window from the
+        // WINDOWS * rows matrix and writes only output[row]. Inputs and output
+        // are disjoint, and padded threads return before any access.
+        let _ = unsafe { builder.launch(Self::launch_config(rows_arg)) }?;
+        self.stream().synchronize()?;
+        Ok(true)
     }
 
     pub fn signed_column(&self, rows: &[i128]) -> Result<SignedColumn, CudaError> {
@@ -4304,6 +4405,56 @@ mod tests {
                     .expect("adaptive small segment sums"),
             );
             assert_eq!(got, expected, "{segments} segments");
+        }
+    }
+
+    #[test]
+    fn shared_scalar_rows_handle_empty_schedules_and_partial_blocks() {
+        let Some(context) = device() else { return };
+        let wide = Fr::from_u64(u64::MAX) * Fr::from_u64(u64::MAX);
+        let weights = [
+            Fr::from_u64(0),
+            Fr::from_u64(1),
+            -Fr::from_u64(1),
+            wide,
+            -wide,
+            wide + Fr::from_u64(7),
+            -wide - Fr::from_u64(11),
+            Fr::from_u64(13),
+        ];
+        for rows in [127usize, 128, 129] {
+            let coefficient = |term: usize, row: usize| {
+                if row.is_multiple_of(7) || (term + row).is_multiple_of(5) {
+                    0
+                } else {
+                    (term * rows + row + 1) as u64
+                }
+            };
+            let bases: Vec<JacobianLimbs> = (0..weights.len())
+                .flat_map(|term| {
+                    (0..rows).map(move |row| jacobian_limbs(point(coefficient(term, row))))
+                })
+                .collect();
+            for scalars in [weights, [Fr::from_u64(0); 8]] {
+                let expected: Vec<G1Projective> = (0..rows)
+                    .map(|row| {
+                        let scalar = scalars
+                            .iter()
+                            .enumerate()
+                            .map(|(term, &weight)| {
+                                ArkFr::from(coefficient(term, row)) * ark_fr(weight)
+                            })
+                            .sum::<ArkFr>();
+                        G1Projective::generator() * scalar
+                    })
+                    .collect();
+                let got = projectives(
+                    &context
+                        .msm_rows_shared_scalars(&bases, &scalars, rows)
+                        .expect("shared-scalar row MSM"),
+                );
+                assert_eq!(got, expected, "{rows} rows");
+            }
         }
     }
 

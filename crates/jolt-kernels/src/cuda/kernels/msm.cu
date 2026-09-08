@@ -1690,6 +1690,38 @@ extern "C" __global__ void msm_point_rows_sum_kernel(const u64 *__restrict__ par
     }
 }
 
+// All rows share this signed bucket schedule. Adjacent threads process
+// adjacent rows, giving coalesced reads for each scheduled term.
+extern "C" __global__ void msm_shared_scalar_windows_kernel(
+    const u64 *__restrict__ bases, const unsigned int *__restrict__ indices,
+    const unsigned int *__restrict__ offsets, unsigned int rows, unsigned int buckets,
+    u64 *__restrict__ out) {
+    unsigned int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+    unsigned int window = blockIdx.y;
+    u64 running[3 * LIMBS], result[3 * LIMBS];
+    u64 base[3 * LIMBS], tmp[3 * LIMBS], negated[LIMBS];
+    jac_set_zero(running);
+    jac_set_zero(result);
+    for (int digit = (int)buckets - 1; digit > 0; digit--) {
+        unsigned int segment = window * buckets + (unsigned int)digit;
+        for (unsigned int pos = offsets[segment]; pos < offsets[segment + 1]; pos++) {
+            unsigned int index = indices[pos];
+            jac_copy(bases + ((unsigned long long)(index & 0x7fffffffu) * rows + row) * 3 * LIMBS,
+                     base);
+            if (index >> 31) {
+                fq_neg(base + LIMBS, negated);
+                fq_copy(negated, base + LIMBS);
+            }
+            jac_add(running, base, tmp);
+            jac_copy(tmp, running);
+        }
+        jac_add(result, running, tmp);
+        jac_copy(tmp, result);
+    }
+    jac_copy(result, out + ((unsigned long long)window * rows + row) * 3 * LIMBS);
+}
+
 extern "C" __global__ void msm_shared_scalar_rows_glv_kernel(
     const u64 *__restrict__ bases, const u64 *__restrict__ coeffs,
     const unsigned char *__restrict__ signs, const u64 *__restrict__ beta, unsigned int rows,
