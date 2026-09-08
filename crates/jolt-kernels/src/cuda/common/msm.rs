@@ -2542,10 +2542,11 @@ impl CudaKernelContext {
             // a partition of `indices`, so windows are disjoint across threads
             // — and reads `bases` at the affine points those indices name
             // (masked to 31 bits, checked against `bases.count()` on the host).
-            // It writes only `out[s]` (12 limbs) of a `segments * 12` u64 fresh
-            // allocation, one thread per segment. Threads with `s >= segments`
-            // return first. No shared memory and no barriers, which is the
-            // whole point of this path.
+            // Small segments have one writer; larger ones are selected once
+            // by their warp's ballot and only lane 0 writes the result. Every
+            // one of the BLOCK = 256 threads, including out-of-range lanes
+            // with zero counts, reaches the full-warp ballots and shuffles.
+            // The launch bound matches BLOCK; no shared memory is required.
             let _ = unsafe { builder.launch(Self::launch_config(segment_count)) }?;
             self.stream().synchronize()?;
             return Ok(());
@@ -4020,6 +4021,64 @@ mod tests {
                     .expect("device one_hot_chunk_sums"),
             );
             prop_assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn small_segment_sums_handle_skew_and_partial_warps() {
+        let Some(context) = device() else { return };
+        // Base i is i times the generator, so signed index sums are an independent oracle.
+        let bases: Vec<AffineLimbs> = (0..SEGMENT_BASES)
+            .map(|index| affine_limbs(affine(index as u64)))
+            .collect();
+        let device_bases = context.upload_g1_bases(&bases).expect("upload bases");
+        for segments in [1, 31, 32, 33, 255, 256, 257] {
+            let counts: Vec<u32> = (0..segments)
+                .map(|index| {
+                    if index + 1 == segments {
+                        4097
+                    } else {
+                        [0, 1, 63, 64, 65, 66, 1024][index % 7]
+                    }
+                })
+                .collect();
+            let mut indices = Vec::new();
+            let expected: Vec<G1Projective> = counts
+                .iter()
+                .enumerate()
+                .map(|(segment, &count)| {
+                    let mut sum = 0i64;
+                    for term in 0..count {
+                        let index = (term / 2 + segment as u32 + 1) % SEGMENT_BASES as u32;
+                        let negate = if segment % 2 == 0 {
+                            term % 2 != 0
+                        } else {
+                            term % 3 == 0
+                        };
+                        indices.push(index | (u32::from(negate) << 31));
+                        sum += if negate {
+                            -i64::from(index)
+                        } else {
+                            i64::from(index)
+                        };
+                    }
+                    let result = point(sum.unsigned_abs());
+                    if sum < 0 {
+                        -result
+                    } else {
+                        result
+                    }
+                })
+                .collect();
+            let plan = context
+                .upload_segments(&device_bases, &indices, &counts)
+                .expect("upload mixed segment plan");
+            let got = projectives(
+                &context
+                    .segment_sums(&device_bases, &plan, SegmentMode::Small)
+                    .expect("adaptive small segment sums"),
+            );
+            assert_eq!(got, expected, "{segments} segments");
         }
     }
 

@@ -1480,37 +1480,51 @@ extern "C" __global__ void msm_fold_rows_kernel(const u64 *__restrict__ table,
     store4(out + (unsigned long long)column * LIMBS, acc);
 }
 
-extern "C" __global__ void msm_segment_sum_small_kernel(const u64 *__restrict__ bases,
-                                                        const unsigned int *__restrict__ indices,
-                                                        const unsigned int *__restrict__ offsets,
-                                                        const unsigned int *__restrict__ counts,
-                                                        unsigned int segments,
-                                                        u64 *__restrict__ out) {
+// Limit the warp fallback's register footprint to preserve small-bucket throughput.
+extern "C" __global__ __launch_bounds__(256, 2)
+void msm_segment_sum_small_kernel(const u64 *__restrict__ bases,
+                                  const unsigned int *__restrict__ indices,
+                                  const unsigned int *__restrict__ offsets,
+                                  const unsigned int *__restrict__ counts,
+                                  unsigned int segments, u64 *__restrict__ out) {
+    constexpr unsigned int SERIAL_LIMIT = 64u;
     unsigned int segment = blockIdx.x * blockDim.x + threadIdx.x;
-    if (segment >= segments) return;
-    unsigned int start = offsets[segment];
-    unsigned int end = start + counts[segment];
+    unsigned int lane = threadIdx.x & (MSM_SEGMENT_WARP - 1u);
+    unsigned int start = segment < segments ? offsets[segment] : 0;
+    unsigned int size = segment < segments ? counts[segment] : 0;
+    unsigned int pending = __ballot_sync(0xffffffffu, size > SERIAL_LIMIT);
 
-    u64 acc[3 * LIMBS], tmp[3 * LIMBS];
-    jac_set_zero(acc);
-    for (unsigned int i = start; i < end; i++) {
-        unsigned int index = indices[i];
-        unsigned int negate = index >> 31;
-        index &= 0x7fffffffu;
-        u64 bx[LIMBS], by[LIMBS];
-        load4(bases + (unsigned long long)index * 2 * LIMBS, bx);
-        load4(bases + ((unsigned long long)index * 2 + 1) * LIMBS, by);
-        if (negate != 0) {
-            u64 negated[LIMBS];
-            fq_neg(by, negated);
-            jac_add_affine(acc, bx, negated, tmp);
-        } else {
-            jac_add_affine(acc, bx, by, tmp);
+    u64 acc[3 * LIMBS], tmp[3 * LIMBS], peer[3 * LIMBS];
+    if (segment < segments && size <= SERIAL_LIMIT) {
+        msm_segment_accumulate(bases, indices, start, start + size, 0, 1, acc);
+        for (int limb = 0; limb < 3; limb++) {
+            store4(out + ((unsigned long long)segment * 3 + limb) * LIMBS, acc + limb * LIMBS);
         }
-        jac_copy(tmp, acc);
     }
-    for (int limb = 0; limb < 3; limb++) {
-        store4(out + ((unsigned long long)segment * 3 + limb) * LIMBS, acc + limb * LIMBS);
+
+    // The average bucket size can hide a few long serial chains. Share those
+    // buckets across their warp without building a separate segment plan.
+    while (pending != 0) {
+        unsigned int leader = __ffs(pending) - 1;
+        unsigned int begin = __shfl_sync(0xffffffffu, start, leader);
+        unsigned int length = __shfl_sync(0xffffffffu, size, leader);
+        msm_segment_accumulate(bases, indices, begin, begin + length, lane, MSM_SEGMENT_WARP, acc);
+        for (unsigned int stride = MSM_SEGMENT_WARP >> 1; stride != 0; stride >>= 1) {
+            for (int limb = 0; limb < 3 * LIMBS; limb++) {
+                peer[limb] = __shfl_down_sync(0xffffffffu, acc[limb], stride);
+            }
+            if (lane < stride) {
+                jac_add(acc, peer, tmp);
+                jac_copy(tmp, acc);
+            }
+        }
+        if (lane == 0) {
+            unsigned int target = (segment & ~(MSM_SEGMENT_WARP - 1u)) + leader;
+            for (int limb = 0; limb < 3; limb++) {
+                store4(out + ((unsigned long long)target * 3 + limb) * LIMBS, acc + limb * LIMBS);
+            }
+        }
+        pending &= pending - 1;
     }
 }
 
