@@ -744,14 +744,18 @@ extern "C" __global__ void pairing_miller_warp_kernel(const u64 *__restrict__ g1
 
 extern "C" __global__ void pairing_fq12_product_kernel(const u64 *__restrict__ values,
                                                        unsigned int count,
+                                                       unsigned int chunk_size,
                                                        u64 *__restrict__ out) {
     extern __shared__ u64 shared[];
     u64 *slot = shared + (unsigned long long)threadIdx.x * FQ12_LIMBS;
-    const u64 *lane = values + (unsigned long long)blockIdx.x * count * FQ12_LIMBS;
+    const unsigned int start = blockIdx.x * chunk_size;
+    const unsigned int chunk_count = min(chunk_size, count - start);
+    const u64 *lane =
+        values + ((unsigned long long)blockIdx.y * count + start) * FQ12_LIMBS;
 
     u64 acc[FQ12_LIMBS], scratch[FQ12_LIMBS];
     fq12_set_one(acc);
-    for (unsigned int i = threadIdx.x; i < count; i += blockDim.x) {
+    for (unsigned int i = threadIdx.x; i < chunk_count; i += blockDim.x) {
         fq12_mul(acc, lane + (unsigned long long)i * FQ12_LIMBS, scratch);
         fq12_copy(scratch, acc);
     }
@@ -768,7 +772,8 @@ extern "C" __global__ void pairing_fq12_product_kernel(const u64 *__restrict__ v
     }
 
     if (threadIdx.x == 0) {
-        u64 *target = out + (unsigned long long)blockIdx.x * FQ12_LIMBS;
+        u64 *target =
+            out + ((unsigned long long)blockIdx.y * gridDim.x + blockIdx.x) * FQ12_LIMBS;
         for (int i = 0; i < FQ12_LIMBS; i++) target[i] = shared[i];
     }
 }

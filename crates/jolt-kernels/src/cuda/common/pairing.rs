@@ -64,6 +64,9 @@ const PC_WORDS: usize = 28;
 
 const PRODUCT_BLOCK: u32 = 32;
 
+// Bound each block's serial work when a segment contains thousands of pairs.
+const PRODUCT_CHUNK: u32 = 256;
+
 const WARP: u32 = 32;
 
 const MILLER_WARP_WARPS: u32 = 4;
@@ -320,31 +323,7 @@ impl CudaKernelContext {
             Ok(())
         })?;
 
-        let mut product = self.alloc_u64(segments.len() * FQ12_LIMBS)?;
-        let shared = PRODUCT_BLOCK * FQ12_LIMBS as u32 * size_of::<u64>() as u32;
-        let mut builder = self.stream().launch_builder(self.pairing_fq12_product());
-        let _ = builder.arg(&lanes);
-        let _ = builder.arg(&pairs);
-        let _ = builder.arg(&mut product);
-        // SAFETY: one block per segment, so `blockIdx.x < segments` selects the
-        // `count` Fq12 values at `blockIdx.x * count` of `lanes`, which holds
-        // `segments * count` of them; each thread strides by `blockDim.x` from
-        // `threadIdx.x` and so stays below `count`. Shared memory is
-        // `PRODUCT_BLOCK * FQ12_LIMBS` u64s, matching `shared_mem_bytes`, and
-        // `PRODUCT_BLOCK` is a power of two so the halving tree covers the
-        // block; every thread reaches each `__syncthreads()` because the strided
-        // loop and the tree sit outside any early return. Only thread 0 writes,
-        // to slot `blockIdx.x` of the freshly allocated `product`, which is
-        // distinct from `lanes`.
-        let _ = unsafe {
-            builder.launch(LaunchConfig {
-                grid_dim: (lanes_of, 1, 1),
-                block_dim: (PRODUCT_BLOCK, 1, 1),
-                shared_mem_bytes: shared,
-            })
-        }?;
-
-        self.download_u64(&product)
+        self.fq12_product_batch(lanes, pairs, lanes_of)
     }
 
     pub fn multi_miller_warp_batch(
@@ -429,31 +408,53 @@ impl CudaKernelContext {
             Ok(())
         })?;
 
-        let mut product = self.alloc_u64(segments.len() * FQ12_LIMBS)?;
-        let shared = PRODUCT_BLOCK * FQ12_LIMBS as u32 * size_of::<u64>() as u32;
-        let mut builder = self.stream().launch_builder(self.pairing_fq12_product());
-        let _ = builder.arg(&lanes);
-        let _ = builder.arg(&pairs);
-        let _ = builder.arg(&mut product);
-        // SAFETY: one block per segment, so `blockIdx.x < segments` selects the
-        // `count` Fq12 values at `blockIdx.x * count` of `lanes`, which holds
-        // `segments * count` of them; each thread strides by `blockDim.x` from
-        // `threadIdx.x` and so stays below `count`. Shared memory is
-        // `PRODUCT_BLOCK * FQ12_LIMBS` u64s, matching `shared_mem_bytes`, and
-        // `PRODUCT_BLOCK` is a power of two so the halving tree covers the
-        // block; every thread reaches each `__syncthreads()` because the strided
-        // loop and the tree sit outside any early return. Only thread 0 writes,
-        // to slot `blockIdx.x` of the freshly allocated `product`, which is
-        // distinct from `lanes`.
-        let _ = unsafe {
-            builder.launch(LaunchConfig {
-                grid_dim: (lanes_of, 1, 1),
-                block_dim: (PRODUCT_BLOCK, 1, 1),
-                shared_mem_bytes: shared,
-            })
-        }?;
+        self.fq12_product_batch(lanes, pairs, lanes_of)
+    }
 
-        self.download_u64(&product)
+    fn fq12_product_batch(
+        &self,
+        mut values: CudaSlice<u64>,
+        mut count: u32,
+        segments: u32,
+    ) -> Result<Vec<u64>, CudaError> {
+        let expected_len = (segments as usize)
+            .checked_mul(count as usize)
+            .and_then(|len| len.checked_mul(FQ12_LIMBS));
+        if count == 0 || segments == 0 || expected_len != Some(values.len()) {
+            return Err(CudaError::InvariantViolation {
+                reason: "an Fq12 product batch needs nonempty, equally sized segments",
+            });
+        }
+        let shared = PRODUCT_BLOCK * FQ12_LIMBS as u32 * size_of::<u64>() as u32;
+        loop {
+            let chunks = count.div_ceil(PRODUCT_CHUNK);
+            let mut product = self.alloc_u64(segments as usize * chunks as usize * FQ12_LIMBS)?;
+            let mut builder = self.stream().launch_builder(self.pairing_fq12_product());
+            let _ = builder.arg(&values);
+            let _ = builder.arg(&count);
+            let _ = builder.arg(&PRODUCT_CHUNK);
+            let _ = builder.arg(&mut product);
+            // SAFETY: the grid indexes (chunk, segment). Each block reads at
+            // most PRODUCT_CHUNK values, clipped to its segment's count, and
+            // writes one distinct Fq12 at segment * chunks + chunk. The input
+            // length is checked above and each pass preserves this layout;
+            // output allocations only shrink, so their lengths cannot overflow.
+            // Shared memory holds PRODUCT_BLOCK Fq12 values. This power-of-two
+            // block size covers the halving tree, and all threads reach every
+            // barrier. Input and output are distinct, ordered on the same stream.
+            let _ = unsafe {
+                builder.launch(LaunchConfig {
+                    grid_dim: (chunks, segments, 1),
+                    block_dim: (PRODUCT_BLOCK, 1, 1),
+                    shared_mem_bytes: shared,
+                })
+            }?;
+            if chunks == 1 {
+                return self.download_u64(&product);
+            }
+            values = product;
+            count = chunks;
+        }
     }
 }
 
@@ -616,6 +617,34 @@ mod tests {
         cases.push((ps, qs));
 
         cases
+    }
+
+    #[test]
+    fn fq12_product_segments_match_arkworks_across_reduction_levels() {
+        let Some(context) = shared_context() else {
+            return;
+        };
+        let mut rng = ChaCha20Rng::seed_from_u64(7_000);
+        let chunk = PRODUCT_CHUNK as usize;
+        for count in [chunk - 1, chunk, chunk + 1, 8193, chunk * chunk + 1] {
+            let mut values: Vec<Fq12> = (0..3 * count).map(|_| Fq12::rand(&mut rng)).collect();
+            values[2 * count - 1] = Fq12::ZERO;
+            values[2 * count..].fill(Fq12::ONE);
+            let expected: Vec<Fq12> = values
+                .chunks_exact(count)
+                .map(|segment| segment.iter().product())
+                .collect();
+            let words: Vec<u64> = values.iter().flat_map(fq12_words).collect();
+            let uploaded = context.upload_raw_u64(&words).unwrap();
+            let limbs = context
+                .fq12_product_batch(uploaded, count as u32, 3)
+                .unwrap();
+            let got: Vec<Fq12> = limbs.chunks_exact(FQ12_LIMBS).map(fq12).collect();
+            assert_eq!(
+                got, expected,
+                "Fq12 products diverged at {count} values per segment"
+            );
+        }
     }
 
     #[test]
