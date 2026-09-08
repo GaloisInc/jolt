@@ -1670,6 +1670,7 @@ extern "C" __global__ void msm_shared_scalar_rows_glv_kernel(
 
     u64 acc[3 * LIMBS], tmp[3 * LIMBS], product[3 * LIMBS];
     u64 low[3 * LIMBS], high[3 * LIMBS], factor[LIMBS], scaled[LIMBS];
+    u64 both[3 * LIMBS];
     load4(beta, factor);
     jac_set_zero(acc);
     for (unsigned int term = threadIdx.x; term < terms; term += blockDim.x) {
@@ -1693,16 +1694,18 @@ extern "C" __global__ void msm_shared_scalar_rows_glv_kernel(
 
         const u64 *first = coeffs + (unsigned long long)term * LIMBS;
         const u64 *second = coeffs + ((unsigned long long)terms + term) * LIMBS;
+        // Reuse low + high when both GLV components have this bit set.
+        jac_add(low, high, both);
         jac_set_zero(product);
         for (int bit = (int)max_bits - 1; bit >= 0; bit--) {
             jac_double(product, tmp);
             jac_copy(tmp, product);
-            if (((first[bit >> 6] >> (bit & 63)) & 1ULL) != 0ULL) {
-                jac_add(product, low, tmp);
-                jac_copy(tmp, product);
-            }
-            if (((second[bit >> 6] >> (bit & 63)) & 1ULL) != 0ULL) {
-                jac_add(product, high, tmp);
+            const unsigned int pair =
+                (unsigned int)((first[bit >> 6] >> (bit & 63)) & 1ULL) |
+                ((unsigned int)((second[bit >> 6] >> (bit & 63)) & 1ULL) << 1);
+            if (pair != 0u) {
+                const u64 *addend = pair == 1u ? low : (pair == 2u ? high : both);
+                jac_add(product, addend, tmp);
                 jac_copy(tmp, product);
             }
         }
