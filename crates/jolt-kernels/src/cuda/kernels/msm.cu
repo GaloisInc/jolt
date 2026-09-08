@@ -571,34 +571,63 @@ extern "C" __global__ void msm_g1_add_kernel(const u64 *__restrict__ left,
     }
 }
 
+__device__ __forceinline__ void msm_g2_segment_accumulate(
+    const u64 *bases, const unsigned int *indices, unsigned int start, unsigned int end,
+    unsigned int rank, unsigned int stride, u64 *acc) {
+    u64 base[G2_LIMBS], tmp[G2_LIMBS];
+    jac2_set_zero(acc);
+    for (unsigned int i = start + rank; i < end; i += stride) {
+        unsigned int index = indices[i];
+        jac2_copy(bases + (unsigned long long)(index & 0x7fffffffu) * G2_LIMBS, base);
+        if (index >> 31) g2_negate_y(base);
+        jac2_add(acc, base, tmp);
+        jac2_copy(tmp, acc);
+    }
+}
+
 extern "C" __global__ void msm_g2_segment_sum_small_kernel(const u64 *__restrict__ bases,
                                                           const unsigned int *__restrict__ indices,
                                                           const unsigned int *__restrict__ offsets,
                                                           const unsigned int *__restrict__ counts,
                                                           unsigned int segments,
                                                           u64 *__restrict__ out) {
+    constexpr unsigned int WARP = 32u;
+    constexpr unsigned int SERIAL_LIMIT = 64u;
     unsigned int segment = blockIdx.x * blockDim.x + threadIdx.x;
-    if (segment >= segments) return;
-    unsigned int start = offsets[segment];
-    unsigned int end = start + counts[segment];
+    unsigned int lane = threadIdx.x & (WARP - 1u);
+    unsigned int start = segment < segments ? offsets[segment] : 0;
+    unsigned int size = segment < segments ? counts[segment] : 0;
+    unsigned int pending = __ballot_sync(0xffffffffu, size > SERIAL_LIMIT);
+    // A warp handles selected buckets sequentially. Keep many medium-sized
+    // buckets independent, but share the few large high-window GLV buckets.
+    bool cooperative = size > SERIAL_LIMIT && size > SERIAL_LIMIT * __popc(pending);
+    pending = __ballot_sync(0xffffffffu, cooperative);
 
-    u64 acc[G2_LIMBS], tmp[G2_LIMBS], base[G2_LIMBS], negated[LIMBS];
-    jac2_set_zero(acc);
-    for (unsigned int i = start; i < end; i++) {
-        unsigned int index = indices[i];
-        unsigned int negate = index >> 31;
-        index &= 0x7fffffffu;
-        jac2_copy(bases + (unsigned long long)index * G2_LIMBS, base);
-        if (negate != 0) {
-            fq_neg(base + 2 * LIMBS, negated);
-            fq_copy(negated, base + 2 * LIMBS);
-            fq_neg(base + 3 * LIMBS, negated);
-            fq_copy(negated, base + 3 * LIMBS);
-        }
-        jac2_add(acc, base, tmp);
-        jac2_copy(tmp, acc);
+    u64 acc[G2_LIMBS], tmp[G2_LIMBS], peer[G2_LIMBS];
+    if (segment < segments && !cooperative) {
+        msm_g2_segment_accumulate(bases, indices, start, start + size, 0, 1, acc);
+        jac2_copy(acc, out + (unsigned long long)segment * G2_LIMBS);
     }
-    jac2_copy(acc, out + (unsigned long long)segment * G2_LIMBS);
+    while (pending != 0) {
+        unsigned int leader = __ffs(pending) - 1;
+        unsigned int begin = __shfl_sync(0xffffffffu, start, leader);
+        unsigned int length = __shfl_sync(0xffffffffu, size, leader);
+        msm_g2_segment_accumulate(bases, indices, begin, begin + length, lane, WARP, acc);
+        for (unsigned int stride = WARP >> 1; stride != 0; stride >>= 1) {
+            for (int limb = 0; limb < G2_LIMBS; limb++) {
+                peer[limb] = __shfl_down_sync(0xffffffffu, acc[limb], stride);
+            }
+            if (lane < stride) {
+                jac2_add(acc, peer, tmp);
+                jac2_copy(tmp, acc);
+            }
+        }
+        if (lane == 0) {
+            unsigned int target = (segment & ~(WARP - 1u)) + leader;
+            jac2_copy(acc, out + (unsigned long long)target * G2_LIMBS);
+        }
+        pending &= pending - 1;
+    }
 }
 
 extern "C" __global__ void msm_g2_bucket_reduce_chunked_kernel(

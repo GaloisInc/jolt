@@ -1919,14 +1919,12 @@ impl CudaKernelContext {
         let _ = builder.arg(&index.counts);
         let _ = builder.arg(&segments_arg);
         let _ = builder.arg(&mut bucket_points);
-        // SAFETY: thread `s < segments` reads `offsets[s]`/`counts[s]` and only
-        // the `indices` window they delimit — the scatter builds those as a
-        // partition of `indices` — and reads `bases` at the G2 points those
-        // indices name, each masked to 31 bits and less than `count` because the
-        // scatter stores `i % row_len` with `row_len = count`, inside the
-        // `count`-point view checked above. It writes only `out[s]` of a
-        // `segments`-point fresh allocation, one thread per segment. Threads with
-        // `s >= segments` return first.
+        // SAFETY: the scatter partitions `indices` into the ranges described by
+        // `offsets`/`counts`; masked indices are below `terms`, the mapped base
+        // count. Each segment has one writer: its own thread, or lane 0 of its
+        // warp after a cooperative reduction. BLOCK is a multiple of 32, and
+        // padded threads participate in every warp collective without accessing
+        // input metadata or writing output. The output is a fresh allocation.
         let _ = unsafe { builder.launch(Self::launch_config(segments_arg)) }?;
 
         let accumulator =
@@ -4561,6 +4559,87 @@ mod tests {
             )
         };
         G2Projective::new_unchecked(fq2(&limbs[..8]), fq2(&limbs[8..16]), fq2(&limbs[16..24]))
+    }
+
+    #[test]
+    fn g2_segment_sums_handle_skew_and_partial_warps() {
+        use cudarc::driver::PushKernelArg;
+
+        let Some(context) = device() else { return };
+        let generator = G2Projective::generator();
+        let bases: Vec<G2Projective> = (0..SEGMENT_BASES)
+            .map(|index| generator * ArkFr::from(index as u64))
+            .collect();
+        let device_bases = context
+            .upload_raw_u64(&flat_g2(&bases))
+            .expect("upload bases");
+        for segments in [1usize, 31, 32, 33, 255, 256, 257] {
+            let counts: Vec<u32> = (0..segments)
+                .map(|index| {
+                    if index + 1 == segments {
+                        4097
+                    } else {
+                        [0, 1, 63, 64, 65, 66, 128, 129, 1024][index % 9]
+                    }
+                })
+                .collect();
+            let mut offsets = Vec::with_capacity(segments);
+            let mut indices = Vec::new();
+            // Base i is i times the generator, including the identity at zero.
+            let expected: Vec<G2Projective> = counts
+                .iter()
+                .enumerate()
+                .map(|(segment, &count)| {
+                    offsets.push(indices.len() as u32);
+                    let mut sum = 0i64;
+                    for term in 0..count {
+                        let index = (term / 2 + segment as u32 + 1) % SEGMENT_BASES as u32;
+                        let negate = if segment % 2 == 0 {
+                            term % 2 != 0
+                        } else {
+                            term % 3 == 0
+                        };
+                        indices.push(index | (u32::from(negate) << 31));
+                        sum += if negate {
+                            -i64::from(index)
+                        } else {
+                            i64::from(index)
+                        };
+                    }
+                    let result = generator * ArkFr::from(sum.unsigned_abs());
+                    if sum < 0 {
+                        -result
+                    } else {
+                        result
+                    }
+                })
+                .collect();
+            let device_indices = context.upload_u32_slice(&indices).expect("upload indices");
+            let device_offsets = context.upload_u32_slice(&offsets).expect("upload offsets");
+            let device_counts = context.upload_u32_slice(&counts).expect("upload counts");
+            let mut out = context.alloc_u64(segments * 24).expect("allocate sums");
+            let segments_arg = segments as u32;
+            let mut builder = context
+                .stream()
+                .launch_builder(context.msm_g2_segment_sum_small());
+            let _ = builder.arg(&device_bases);
+            let _ = builder.arg(&device_indices);
+            let _ = builder.arg(&device_offsets);
+            let _ = builder.arg(&device_counts);
+            let _ = builder.arg(&segments_arg);
+            let _ = builder.arg(&mut out);
+            // SAFETY: the CSR ranges partition indices, every masked index is
+            // below bases.len(), and the rounded launch provides complete warps.
+            let _ = unsafe { builder.launch(CudaKernelContext::launch_config(segments_arg)) }
+                .expect("G2 segment sums");
+            let hosted = context.download_u64(&out).expect("download sums");
+            let got: Vec<G2Projective> = hosted.chunks_exact(24).map(g2_from_limbs).collect();
+            assert_eq!(
+                G2Projective::normalize_batch(&got),
+                G2Projective::normalize_batch(&expected),
+                "{segments} segments"
+            );
+        }
     }
 
     #[test]
