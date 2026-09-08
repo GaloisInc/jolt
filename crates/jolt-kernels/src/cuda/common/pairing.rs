@@ -73,6 +73,8 @@ const MILLER_WARP_WARPS: u32 = 4;
 
 const MILLER_WARP_MAX_PAIRS: usize = 256;
 
+const PREPARED_PAIRS_PER_THREAD: usize = 4;
+
 const MAX_PREPARED_BYTES: usize = 512 * 1024 * 1024;
 
 struct Constants {
@@ -286,20 +288,12 @@ impl CudaKernelContext {
             g2_offsets.push(Self::count_of(g2_offset)?);
         }
 
-        let lanes_len = segments
-            .len()
-            .checked_mul(count)
-            .and_then(|pairs| pairs.checked_mul(FQ12_LIMBS))
-            .ok_or(CudaError::InvariantViolation {
-                reason: "a multi-Miller batch overflowed its lane buffer",
-            })?;
-        let mut lanes = self.alloc_u64_unset(lanes_len)?;
         let pairs = Self::count_of(count)?;
         let lanes_of = Self::count_of(segments.len())?;
         let device_g1_offsets = self.upload_u32_slice(&g1_offsets)?;
         let device_g2_offsets = self.upload_u32_slice(&g2_offsets)?;
 
-        self.with_pairing_constants(|constants| {
+        let (lanes, reduced_pairs) = self.with_pairing_constants(|constants| {
             let ate_len = Self::count_of(constants.ate_len)?;
             let prepared_words = count
                 .checked_mul(constants.line_count)
@@ -308,7 +302,22 @@ impl CudaKernelContext {
             let shared_offset = g2_offsets.first().copied().filter(|offset| {
                 g2_offsets.len() > 1 && g2_offsets.iter().all(|candidate| candidate == offset)
             });
-            if let Some((offset, words)) = shared_offset.zip(prepared_words) {
+            let prepared = shared_offset.zip(prepared_words);
+            let reduced_count = if prepared.is_some() {
+                count.div_ceil(PREPARED_PAIRS_PER_THREAD)
+            } else {
+                count
+            };
+            let lanes_len = segments
+                .len()
+                .checked_mul(reduced_count)
+                .and_then(|pairs| pairs.checked_mul(FQ12_LIMBS))
+                .ok_or(CudaError::InvariantViolation {
+                    reason: "a multi-Miller batch overflowed its lane buffer",
+                })?;
+            let mut lanes = self.alloc_u64_unset(lanes_len)?;
+            let reduced_pairs = Self::count_of(reduced_count)?;
+            if let Some((offset, words)) = prepared {
                 let mut lines = self.alloc_u64_unset(words)?;
                 let mut prepare = self.stream().launch_builder(self.pairing_prepare_g2());
                 let _ = prepare.arg(g2);
@@ -334,14 +343,15 @@ impl CudaKernelContext {
                 let _ = apply.arg(&offset);
                 let _ = apply.arg(&pairs);
                 let _ = apply.arg(&mut lanes);
-                let mut config = Self::launch_config(pairs);
+                let mut config = Self::launch_config(reduced_pairs);
                 config.grid_dim.1 = lanes_of;
                 // SAFETY: the checked G1 spans and common G2 span cover the
                 // grid. Preparation runs first on this stream, and every
                 // nonidentity pair's coefficient lanes are initialized. Each
-                // (segment, pair) writes one distinct Fq12 in lanes.
+                // (segment, group) writes one distinct Fq12 in lanes. The
+                // kernel groups four strided pairs, matching reduced_count.
                 let _ = unsafe { apply.launch(config) }?;
-                return Ok(());
+                return Ok((lanes, reduced_pairs));
             }
 
             let mut builder = self.stream().launch_builder(self.pairing_miller());
@@ -370,10 +380,10 @@ impl CudaKernelContext {
             config.grid_dim.1 = lanes_of;
             // SAFETY: as argued above.
             let _ = unsafe { builder.launch(config) }?;
-            Ok(())
+            Ok((lanes, pairs))
         })?;
 
-        self.fq12_product_batch(lanes, pairs, lanes_of)
+        self.fq12_product_batch(lanes, reduced_pairs, lanes_of)
     }
 
     pub fn multi_miller_warp_batch(
@@ -924,6 +934,7 @@ mod tests {
             ps[slot] = ps[slot].into_affine().into();
             qs[slot] = qs[slot].into_affine().into();
         }
+        ps[offset + 2 * count..].fill(G1Projective::default());
         let device_g1 = context
             .upload_raw_u64(&ps.iter().flat_map(g1_words).collect::<Vec<_>>())
             .unwrap();
