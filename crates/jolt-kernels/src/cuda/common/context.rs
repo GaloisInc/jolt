@@ -162,6 +162,8 @@ pub struct CudaKernelContext {
     msm_g2_fixed_base: CudaFunction,
     pairing_miller: CudaFunction,
     pairing_miller_warp: CudaFunction,
+    pairing_prepare_g2: CudaFunction,
+    pairing_miller_prepared: CudaFunction,
     pairing_fq12_product: CudaFunction,
     pub(super) fq6_mul_probe: CudaFunction,
     pub(super) fq6_mul_by_01_probe: CudaFunction,
@@ -356,6 +358,8 @@ impl CudaKernelContext {
             msm_g2_fixed_base: module.load_function("msm_g2_fixed_base_kernel")?,
             pairing_miller: module.load_function("pairing_miller_kernel")?,
             pairing_miller_warp: module.load_function("pairing_miller_warp_kernel")?,
+            pairing_prepare_g2: module.load_function("pairing_prepare_g2_kernel")?,
+            pairing_miller_prepared: module.load_function("pairing_miller_prepared_kernel")?,
             pairing_fq12_product: module.load_function("pairing_fq12_product_kernel")?,
             fq6_mul_probe: module.load_function("fq6_mul_probe")?,
             fq6_mul_by_01_probe: module.load_function("fq6_mul_by_01_probe")?,
@@ -934,6 +938,14 @@ impl CudaKernelContext {
 
     pub(crate) const fn pairing_miller_warp(&self) -> &CudaFunction {
         &self.pairing_miller_warp
+    }
+
+    pub(crate) const fn pairing_prepare_g2(&self) -> &CudaFunction {
+        &self.pairing_prepare_g2
+    }
+
+    pub(crate) const fn pairing_miller_prepared(&self) -> &CudaFunction {
+        &self.pairing_miller_prepared
     }
 
     pub(crate) const fn pairing_fq12_product(&self) -> &CudaFunction {
