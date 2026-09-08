@@ -54,16 +54,12 @@ __device__ __forceinline__ void unr_finalize(const u64 *folded, u64 *out) {
     }
     limbs[UNR_SLOTS] = carry;
 
-    u64 acc[LIMBS] = {0, 0, 0, 0};
-    u64 scale[LIMBS];
-    load4(UNR_MONT_2_64, scale);
-    for (int i = UNR_SLOTS; i >= 0; i--) {
-        u64 scaled[LIMBS];
-        fr_mul(acc, scale, scaled);
-        u64 addend[LIMBS] = {limbs[i], 0, 0, 0};
-        fr_add(scaled, addend, acc);
-    }
-    store4(out, acc);
+    // x = low + high * 2^256. The split-lane carry bounds high to 225 bits,
+    // so it is already canonical; FR_R2 supplies the missing Montgomery factor.
+    u64 low[LIMBS], high[LIMBS];
+    fr_reduce_256(limbs, low);
+    fr_mul(limbs + LIMBS, FR_R2, high);
+    fr_add(low, high, out);
 }
 
 __device__ __forceinline__ void unr_scatter_add(u64 *slots, const u64 *product, unsigned int n) {
@@ -136,27 +132,7 @@ extern "C" __global__ void unr_reduce_kernel(const u64 *__restrict__ slots,
                                              unsigned int bucket_count) {
     unsigned int b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= bucket_count) return;
-
-    const u64 *half = slots + (unsigned long long)b * (2 * UNR_SLOTS);
-    u64 limbs[UNR_SLOTS + 1];
-    for (int i = 0; i < UNR_SLOTS + 1; i++) limbs[i] = 0;
-
-    u64 carry = 0;
-    for (int i = 0; i < UNR_SLOTS; i++) {
-        u128 t = (u128)half[2 * i] + ((u128)half[2 * i + 1] << 32) + (u128)carry;
-        limbs[i] = (u64)t;
-        carry = (u64)(t >> 64);
-    }
-    limbs[UNR_SLOTS] = carry;
-
-    u64 acc[LIMBS] = {0, 0, 0, 0};
-    u64 scale[LIMBS];
-    load4(UNR_MONT_2_64, scale);
-    for (int i = UNR_SLOTS; i >= 0; i--) {
-        u64 scaled[LIMBS];
-        fr_mul(acc, scale, scaled);
-        u64 addend[LIMBS] = {limbs[i], 0, 0, 0};
-        fr_add(scaled, addend, acc);
-    }
-    store4(out + (unsigned long long)b * LIMBS, acc);
+    u64 reduced[LIMBS];
+    unr_finalize(slots + (unsigned long long)b * (2 * UNR_SLOTS), reduced);
+    store4(out + (unsigned long long)b * LIMBS, reduced);
 }

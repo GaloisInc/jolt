@@ -107,6 +107,26 @@ __device__ __forceinline__ void field_sub(const u64 *a, const u64 *b,
     add4(difference, correction, out);
 }
 
+// Any 256-bit word is below 8p. Subtracting 4p, 2p, then p conditionally
+// canonicalizes it without a Montgomery multiplication.
+__device__ __forceinline__ void fr_reduce_256(const u64 *value, u64 *out) {
+    const u64 four_p[LIMBS] = {
+        0x0f87d64fc0000004ULL, 0xa0cfa121e6e5c245ULL,
+        0xe14116da06056174ULL, 0xc19139cb84c680a6ULL
+    };
+    const u64 two_p[LIMBS] = {
+        0x87c3eb27e0000002ULL, 0x5067d090f372e122ULL,
+        0x70a08b6d0302b0baULL, 0x60c89ce5c2634053ULL
+    };
+    u64 t[LIMBS], reduced[LIMBS];
+    u64 borrow = sub4(value, four_p, reduced);
+    for (int i = 0; i < LIMBS; i++) t[i] = borrow ? value[i] : reduced[i];
+    borrow = sub4(t, two_p, reduced);
+    for (int i = 0; i < LIMBS; i++) t[i] = borrow ? t[i] : reduced[i];
+    borrow = sub4(t, MODULUS, reduced);
+    for (int i = 0; i < LIMBS; i++) out[i] = borrow ? t[i] : reduced[i];
+}
+
 // CIOS Montgomery multiplication. For canonical inputs, each iteration ends
 // below a + modulus < 2^255; the two unshifted sums fit in five limbs.
 __device__ __forceinline__ void mont_accumulate(u64 *t, const u64 *a, u64 b) {

@@ -43,17 +43,15 @@ __device__ __forceinline__ void pa_finalize(const u64 *folded, u64 *out) {
     }
     limbs[PA_SLOTS] = (u64)carry;
 
-    u64 acc[LIMBS] = {0, 0, 0, 0};
-    u64 scale[LIMBS];
-    load4(UNR_MONT_2_64, scale);
-    for (int i = PA_SLOTS; i >= 0; i--) {
-        u64 scaled[LIMBS];
-        fr_mul(acc, scale, scaled);
-        u64 addend[LIMBS] = {limbs[i], 0, 0, 0};
-        fr_add(scaled, addend, acc);
-    }
+    // Products carry two Montgomery factors: reduce x / R as
+    // low / R + middle + high * R, where R = 2^256.
+    u64 low[LIMBS], middle[LIMBS], high[LIMBS];
     u64 raw_one[LIMBS] = {1, 0, 0, 0};
-    u64 reduced[LIMBS];
-    fr_mul(acc, raw_one, reduced);
-    store4(out, reduced);
+    u64 top[LIMBS] = {limbs[PA_SLOTS], 0, 0, 0};
+    fr_reduce_256(limbs, low);
+    fr_reduce_256(limbs + LIMBS, middle);
+    fr_mul(low, raw_one, low);
+    fr_mul(top, FR_R2, high);
+    fr_add(low, middle, out);
+    fr_add(out, high, out);
 }
