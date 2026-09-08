@@ -309,6 +309,8 @@ const G2_POINT_BLOCK: u32 = 64;
 
 const BATCHED_WINDOW_BYTES: usize = 64 << 20;
 
+const MAX_G1_BATCHED_WINDOW_BYTES: usize = 4 << 30;
+
 struct DeviceScalars<'a> {
     values: &'a CudaSlice<u64>,
     limbs: usize,
@@ -2074,13 +2076,42 @@ impl CudaKernelContext {
         Ok(())
     }
 
-    fn batched_windows(rows: usize, buckets: usize, windows: usize, len: usize) -> bool {
+    fn batched_window_bytes(rows: usize, buckets: usize, windows: usize, len: usize) -> usize {
         let segments = windows.saturating_mul(rows).saturating_mul(buckets);
-        let bucket_bytes = segments.saturating_mul(3 * FQ_LIMBS * size_of::<u64>());
+        // Include counts, offsets, cursors and scan scratch alongside the buckets.
+        let bucket_bytes =
+            segments.saturating_mul(3 * FQ_LIMBS * size_of::<u64>() + 4 * size_of::<u32>());
         let index_bytes = windows
             .saturating_mul(len)
-            .saturating_mul(2 * size_of::<u32>());
-        windows > 1 && bucket_bytes.saturating_add(index_bytes) <= BATCHED_WINDOW_BYTES
+            .saturating_mul(2 * size_of::<u32>() + size_of::<u8>());
+        let output_bytes = windows
+            .saturating_mul(rows)
+            .saturating_mul(3 * FQ_LIMBS * size_of::<u64>());
+        bucket_bytes
+            .saturating_add(index_bytes)
+            .saturating_add(output_bytes)
+    }
+
+    fn batched_window_budget(free: usize) -> usize {
+        (free / 8).clamp(BATCHED_WINDOW_BYTES, MAX_G1_BATCHED_WINDOW_BYTES)
+    }
+
+    fn batched_windows(
+        &self,
+        rows: usize,
+        buckets: usize,
+        windows: usize,
+        len: usize,
+    ) -> Result<bool, CudaError> {
+        let bytes = Self::batched_window_bytes(rows, buckets, windows, len);
+        if windows <= 1 || bytes > MAX_G1_BATCHED_WINDOW_BYTES {
+            return Ok(false);
+        }
+        if bytes <= BATCHED_WINDOW_BYTES {
+            return Ok(true);
+        }
+        let (free, _) = self.stream().context().mem_get_info()?;
+        Ok(bytes <= Self::batched_window_budget(free))
     }
 
     fn bucket_index_pass(&self, plan: IndexPlan<'_>) -> Result<BucketIndex, CudaError> {
@@ -2586,7 +2617,7 @@ impl CudaKernelContext {
         let mut accumulator = self.alloc_u64(rows * 3 * FQ_LIMBS)?;
         let rows_arg = Self::count_of(rows)?;
 
-        if Self::batched_windows(rows, buckets, windows, len) {
+        if self.batched_windows(rows, buckets, windows, len)? {
             let _batched = tracing::info_span!(
                 "cuda_pippenger_batched",
                 rows,
@@ -3990,6 +4021,27 @@ mod tests {
             );
             prop_assert_eq!(got, expected);
         }
+    }
+
+    #[test]
+    fn batched_window_budget_reserves_device_headroom() {
+        let mib = 1usize << 20;
+        assert_eq!(CudaKernelContext::batched_window_budget(0), 64 * mib);
+        assert_eq!(
+            CudaKernelContext::batched_window_budget(1024 * mib),
+            128 * mib
+        );
+        assert_eq!(
+            CudaKernelContext::batched_window_budget(usize::MAX),
+            4096 * mib
+        );
+        let large = CudaKernelContext::batched_window_bytes(1024, 2048, 6, 1 << 24);
+        assert!(large > CudaKernelContext::batched_window_budget(8 << 30));
+        assert!(large < CudaKernelContext::batched_window_budget(32 << 30));
+        assert_eq!(
+            CudaKernelContext::batched_window_bytes(usize::MAX, 2, 2, 1),
+            usize::MAX
+        );
     }
 
     const RESIDENT_MSM_LENS: [usize; 6] = [1, 2, 255, 256, 1024, 4096];
