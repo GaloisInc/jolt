@@ -54,7 +54,31 @@ __device__ __forceinline__ bool ohf_index(const u64 *__restrict__ lookup,
     return true;
 }
 
+#if __CUDA_ARCH__ >= 800
+// Two 16-bit reductions preserve the carry in a warp's sum of 32-bit pieces.
+__device__ __forceinline__ u64 ohf_warp_sum_u32(unsigned int peers, unsigned int value) {
+    unsigned int low = __reduce_add_sync(peers, value & 0xffffu);
+    unsigned int high = __reduce_add_sync(peers, value >> 16);
+    return (u64)low + ((u64)high << 16);
+}
+#endif
+
 __device__ __forceinline__ void ohf_atomic_add_field(u64 *lanes, const u64 *value) {
+#if __CUDA_ARCH__ >= 800
+    unsigned int peers = __match_any_sync(__activemask(), (unsigned long long)lanes);
+    if (__popc(peers) >= 4) {
+        bool leader = (threadIdx.x & 31u) == (unsigned int)(__ffs(peers) - 1);
+        for (int i = 0; i < LIMBS; i++) {
+            u64 low = ohf_warp_sum_u32(peers, (unsigned int)value[i]);
+            u64 high = ohf_warp_sum_u32(peers, (unsigned int)(value[i] >> 32));
+            if (leader) {
+                if (low != 0ULL) atomicAdd((unsigned long long *)&lanes[2 * i], low);
+                if (high != 0ULL) atomicAdd((unsigned long long *)&lanes[2 * i + 1], high);
+            }
+        }
+        return;
+    }
+#endif
     for (int i = 0; i < LIMBS; i++) {
         unsigned long long piece = (unsigned long long)value[i];
         unsigned long long low = piece & 0xFFFFFFFFULL;
