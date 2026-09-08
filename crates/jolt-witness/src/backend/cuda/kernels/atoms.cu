@@ -407,6 +407,20 @@ extern "C" __global__ void flag_bit_column_kernel(
   out[index] = (u64)((flags[index] >> bit) & 1u);
 }
 
+__device__ __forceinline__ void hot_chunk_span(u64 *span, u32 value) {
+#if __CUDA_ARCH__ >= 800
+  value = __reduce_max_sync(0xFFFFFFFFu, value);
+#else
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    value = max(value, __shfl_down_sync(0xFFFFFFFFu, value, offset));
+  }
+#endif
+  if ((threadIdx.x & 31u) == 0 && value != 0) {
+    atomicMax(span, (u64)value);
+  }
+}
+
 extern "C" __global__ void hot_chunk_limbs_kernel(
     const u64 *limbs,
     u32 shift,
@@ -416,13 +430,14 @@ extern "C" __global__ void hot_chunk_limbs_kernel(
     u32 slot,
     u32 cycles) {
   u32 index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= cycles) {
-    return;
+  u32 span = 0;
+  if (index < cycles) {
+    u128 value = (u128)limbs[(size_t)index * 2] | ((u128)limbs[(size_t)index * 2 + 1] << 64);
+    u32 chunk = (u32)((value >> shift) & (u128)mask);
+    out[index] = chunk;
+    span = chunk + 1u;
   }
-  u128 value = (u128)limbs[(size_t)index * 2] | ((u128)limbs[(size_t)index * 2 + 1] << 64);
-  u64 chunk = (u64)((value >> shift) & (u128)mask);
-  out[index] = (u32)chunk;
-  atomicMax(spans + slot, chunk + 1ull);
+  hot_chunk_span(spans + slot, span);
 }
 
 extern "C" __global__ void hot_chunk_words_kernel(
@@ -434,17 +449,18 @@ extern "C" __global__ void hot_chunk_words_kernel(
     u32 slot,
     u32 cycles) {
   u32 index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= cycles) {
-    return;
+  u32 span = 0;
+  if (index < cycles) {
+    u32 word = words[index];
+    if (word == COLD) {
+      out[index] = COLD;
+    } else {
+      u32 chunk = (u32)(((u64)word >> shift) & mask);
+      out[index] = chunk;
+      span = chunk + 1u;
+    }
   }
-  u32 word = words[index];
-  if (word == COLD) {
-    out[index] = COLD;
-    return;
-  }
-  u64 chunk = ((u64)word >> shift) & mask;
-  out[index] = (u32)chunk;
-  atomicMax(spans + slot, chunk + 1ull);
+  hot_chunk_span(spans + slot, span);
 }
 
 #define NARROW_REJECTED 0

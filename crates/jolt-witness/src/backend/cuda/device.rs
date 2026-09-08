@@ -731,8 +731,10 @@ impl DeviceTrace {
             // writes only `out[i]` of a
             // fresh `cycles`-element allocation. `spans[slot]` is one element of
             // a `requests.len()`-element buffer, `slot` is this request's index,
-            // and it is mutated only through `atomicMax`. Every buffer is a
-            // distinct allocation.
+            // and warp leaders update it only through `atomicMax`. All threads
+            // reach the warp reduction, including cold/out-of-range lanes with
+            // value zero; BLOCK is a multiple of 32. The checked mask is below
+            // COLD, so chunk + 1 fits u32. Every buffer is a distinct allocation.
             let _ = unsafe { builder.launch(launch_config(count)) }.map_err(device_error)?;
             columns.push(out);
         }
