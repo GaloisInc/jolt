@@ -15,17 +15,6 @@ __device__ __constant__ u64 FQ_MONT_ONE[4] = {
     0x666ea36f7879462cULL, 0x0e0a77c19a07df2fULL
 };
 
-__device__ __forceinline__ int fq_geq_modulus(const u64 *a) {
-    for (int i = 3; i >= 0; i--) {
-        if (a[i] != FQ_MODULUS[i]) return a[i] > FQ_MODULUS[i];
-    }
-    return 1;
-}
-
-__device__ __forceinline__ void fq_sub_modulus(u64 *a) {
-    u64 borrow = 0;
-    for (int i = 0; i < 4; i++) a[i] = sbb(a[i], FQ_MODULUS[i], &borrow);
-}
 
 __device__ __forceinline__ int fq_is_zero(const u64 *a) {
     return (a[0] | a[1] | a[2] | a[3]) == 0;
@@ -36,43 +25,15 @@ __device__ __forceinline__ void fq_copy(const u64 *a, u64 *out) {
 }
 
 __device__ void fq_add(const u64 *a, const u64 *b, u64 *out) {
-    u64 carry = 0;
-    for (int i = 0; i < 4; i++) out[i] = adc(a[i], b[i], &carry);
-    if (carry != 0 || fq_geq_modulus(out)) fq_sub_modulus(out);
+    field_add(a, b, FQ_MODULUS, out);
 }
 
 __device__ void fq_sub(const u64 *a, const u64 *b, u64 *out) {
-    u64 borrow = 0;
-    for (int i = 0; i < 4; i++) out[i] = sbb(a[i], b[i], &borrow);
-    if (borrow != 0) {
-        u64 carry = 0;
-        for (int i = 0; i < 4; i++) out[i] = adc(out[i], FQ_MODULUS[i], &carry);
-    }
+    field_sub(a, b, FQ_MODULUS, out);
 }
 
 __device__ void fq_mul(const u64 *a, const u64 *b, u64 *out) {
-    u64 t[6];
-    for (int i = 0; i < 6; i++) t[i] = 0;
-
-    for (int i = 0; i < 4; i++) {
-        u64 carry = 0;
-        for (int j = 0; j < 4; j++) t[j] = mac(t[j], a[j], b[i], &carry);
-        u64 c = 0;
-        t[4] = adc(t[4], carry, &c);
-        t[5] = adc(t[5], 0, &c);
-
-        u64 m = t[0] * FQ_INV;
-        u64 c2 = 0;
-        mac(t[0], m, FQ_MODULUS[0], &c2);
-        for (int j = 1; j < 4; j++) t[j - 1] = mac(t[j], m, FQ_MODULUS[j], &c2);
-        u64 c3 = 0;
-        t[3] = adc(t[4], c2, &c3);
-        t[4] = adc(t[5], 0, &c3);
-        t[5] = 0;
-    }
-
-    for (int i = 0; i < 4; i++) out[i] = t[i];
-    if (t[4] != 0 || fq_geq_modulus(out)) fq_sub_modulus(out);
+    field_mont_mul(a, b, FQ_MODULUS, FQ_INV, out);
 }
 
 __device__ __forceinline__ void fq_sqr(const u64 *a, u64 *out) {

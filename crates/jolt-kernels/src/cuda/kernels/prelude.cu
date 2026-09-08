@@ -17,27 +17,144 @@ __device__ __forceinline__ u64 mac(u64 a, u64 b, u64 c, u64 *carry) {
 }
 
 __device__ __forceinline__ u64 adc(u64 a, u64 b, u64 *carry) {
-    u128 t = (u128)a + (u128)b + (u128)(*carry);
-    *carry = (u64)(t >> 64);
-    return (u64)t;
+    u64 lo, hi;
+    asm("{\n\t"
+        ".reg .u64 l, h;\n\t"
+        "add.cc.u64 l, %2, %3;\n\t"
+        "addc.u64 h, 0, 0;\n\t"
+        "add.cc.u64 l, l, %4;\n\t"
+        "addc.u64 h, h, 0;\n\t"
+        "mov.u64 %0, l;\n\t"
+        "mov.u64 %1, h;\n\t"
+        "}"
+        : "=l"(lo), "=l"(hi)
+        : "l"(a), "l"(b), "l"(*carry));
+    *carry = hi;
+    return lo;
 }
 
 __device__ __forceinline__ u64 sbb(u64 a, u64 b, u64 *borrow) {
-    u128 t = ((u128)1 << 64) + (u128)a - (u128)b - (u128)(*borrow);
-    *borrow = (t >> 64) == 0 ? 1 : 0;
-    return (u64)t;
+    u64 lo, hi;
+    asm("{\n\t"
+        ".reg .u64 l, h;\n\t"
+        "sub.cc.u64 l, %2, %3;\n\t"
+        "subc.u64 h, 0, 0;\n\t"
+        "sub.cc.u64 l, l, %4;\n\t"
+        "subc.u64 h, h, 0;\n\t"
+        "mov.u64 %0, l;\n\t"
+        "sub.u64 %1, 0, h;\n\t"
+        "}"
+        : "=l"(lo), "=l"(hi)
+        : "l"(a), "l"(b), "l"(*borrow));
+    *borrow = hi;
+    return lo;
 }
 
-__device__ __forceinline__ int geq_modulus(const u64 *a) {
-    for (int i = 3; i >= 0; i--) {
-        if (a[i] != MODULUS[i]) return a[i] > MODULUS[i];
+// Keep carries in CC across all four limbs instead of materializing a
+// 128-bit intermediate and a separate carry at every limb boundary.
+__device__ __forceinline__ void add4(const u64 *a, const u64 *b, u64 *out) {
+    asm("{\n\t"
+        ".reg .u64 t0, t1, t2, t3;\n\t"
+        "add.cc.u64 t0, %4, %8;\n\t"
+        "addc.cc.u64 t1, %5, %9;\n\t"
+        "addc.cc.u64 t2, %6, %10;\n\t"
+        "addc.u64 t3, %7, %11;\n\t"
+        "mov.u64 %0, t0;\n\t"
+        "mov.u64 %1, t1;\n\t"
+        "mov.u64 %2, t2;\n\t"
+        "mov.u64 %3, t3;\n\t"
+        "}"
+        : "=l"(out[0]), "=l"(out[1]), "=l"(out[2]), "=l"(out[3])
+        : "l"(a[0]), "l"(a[1]), "l"(a[2]), "l"(a[3]),
+          "l"(b[0]), "l"(b[1]), "l"(b[2]), "l"(b[3]));
+}
+
+__device__ __forceinline__ u64 sub4(const u64 *a, const u64 *b, u64 *out) {
+    u64 borrow;
+    asm("{\n\t"
+        ".reg .u64 t0, t1, t2, t3, mask;\n\t"
+        "sub.cc.u64 t0, %5, %9;\n\t"
+        "subc.cc.u64 t1, %6, %10;\n\t"
+        "subc.cc.u64 t2, %7, %11;\n\t"
+        "subc.cc.u64 t3, %8, %12;\n\t"
+        "subc.u64 mask, 0, 0;\n\t"
+        "mov.u64 %0, t0;\n\t"
+        "mov.u64 %1, t1;\n\t"
+        "mov.u64 %2, t2;\n\t"
+        "mov.u64 %3, t3;\n\t"
+        "mov.u64 %4, mask;\n\t"
+        "}"
+        : "=l"(out[0]), "=l"(out[1]), "=l"(out[2]), "=l"(out[3]), "=l"(borrow)
+        : "l"(a[0]), "l"(a[1]), "l"(a[2]), "l"(a[3]),
+          "l"(b[0]), "l"(b[1]), "l"(b[2]), "l"(b[3]));
+    return borrow;
+}
+
+__device__ __forceinline__ void field_add(const u64 *a, const u64 *b,
+                                           const u64 *modulus, u64 *out) {
+    u64 sum[LIMBS], reduced[LIMBS];
+    // Both BN254 moduli are below 2^254, so a canonical sum cannot overflow.
+    add4(a, b, sum);
+    u64 borrow = sub4(sum, modulus, reduced);
+    for (int i = 0; i < LIMBS; i++) out[i] = borrow ? sum[i] : reduced[i];
+}
+
+__device__ __forceinline__ void field_sub(const u64 *a, const u64 *b,
+                                           const u64 *modulus, u64 *out) {
+    u64 difference[LIMBS], correction[LIMBS];
+    u64 borrow = sub4(a, b, difference);
+    for (int i = 0; i < LIMBS; i++) correction[i] = modulus[i] & borrow;
+    add4(difference, correction, out);
+}
+
+// CIOS Montgomery multiplication. For canonical inputs, each iteration ends
+// below a + modulus < 2^255; the two unshifted sums fit in five limbs.
+__device__ __forceinline__ void mont_accumulate(u64 *t, const u64 *a, u64 b) {
+    asm("{\n\t"
+        ".reg .u64 l0,l1,l2,l3,h0,h1,h2,h3,r0,r1,r2,r3,r4;\n\t"
+        "mul.lo.u64 l0, %10, %14;\n\t"
+        "mul.lo.u64 l1, %11, %14;\n\t"
+        "mul.lo.u64 l2, %12, %14;\n\t"
+        "mul.lo.u64 l3, %13, %14;\n\t"
+        "mul.hi.u64 h0, %10, %14;\n\t"
+        "mul.hi.u64 h1, %11, %14;\n\t"
+        "mul.hi.u64 h2, %12, %14;\n\t"
+        "mul.hi.u64 h3, %13, %14;\n\t"
+        "add.cc.u64 r0, %5, l0;\n\t"
+        "addc.cc.u64 r1, %6, l1;\n\t"
+        "addc.cc.u64 r2, %7, l2;\n\t"
+        "addc.cc.u64 r3, %8, l3;\n\t"
+        "addc.u64 r4, %9, 0;\n\t"
+        "add.cc.u64 r1, r1, h0;\n\t"
+        "addc.cc.u64 r2, r2, h1;\n\t"
+        "addc.cc.u64 r3, r3, h2;\n\t"
+        "addc.u64 r4, r4, h3;\n\t"
+        "mov.u64 %0, r0;\n\t"
+        "mov.u64 %1, r1;\n\t"
+        "mov.u64 %2, r2;\n\t"
+        "mov.u64 %3, r3;\n\t"
+        "mov.u64 %4, r4;\n\t"
+        "}"
+        : "=l"(t[0]), "=l"(t[1]), "=l"(t[2]), "=l"(t[3]), "=l"(t[4])
+        : "l"(t[0]), "l"(t[1]), "l"(t[2]), "l"(t[3]), "l"(t[4]),
+          "l"(a[0]), "l"(a[1]), "l"(a[2]), "l"(a[3]), "l"(b));
+}
+
+__device__ __forceinline__ void field_mont_mul(const u64 *a, const u64 *b,
+                                                const u64 *modulus, u64 inv, u64 *out) {
+    u64 t[5] = {0, 0, 0, 0, 0};
+#pragma unroll
+    for (int i = 0; i < LIMBS; i++) {
+        mont_accumulate(t, a, b[i]);
+        mont_accumulate(t, modulus, t[0] * inv);
+#pragma unroll
+        for (int j = 0; j < LIMBS; j++) t[j] = t[j + 1];
+        t[4] = 0;
     }
-    return 1;
-}
-
-__device__ __forceinline__ void sub_modulus(u64 *a) {
-    u64 borrow = 0;
-    for (int i = 0; i < 4; i++) a[i] = sbb(a[i], MODULUS[i], &borrow);
+    u64 reduced[LIMBS];
+    u64 borrow = sub4(t, modulus, reduced);
+#pragma unroll
+    for (int i = 0; i < LIMBS; i++) out[i] = borrow ? t[i] : reduced[i];
 }
 
 __device__ __forceinline__ void load4(const u64 *__restrict__ p, u64 *r) {
@@ -52,41 +169,13 @@ __device__ __forceinline__ void store4(u64 *p, const u64 *r) {
 }
 
 __device__ void fr_add(const u64 *a, const u64 *b, u64 *out) {
-    u64 carry = 0;
-    for (int i = 0; i < 4; i++) out[i] = adc(a[i], b[i], &carry);
-    if (carry != 0 || geq_modulus(out)) sub_modulus(out);
+    field_add(a, b, MODULUS, out);
 }
 
 __device__ void fr_sub(const u64 *a, const u64 *b, u64 *out) {
-    u64 borrow = 0;
-    for (int i = 0; i < 4; i++) out[i] = sbb(a[i], b[i], &borrow);
-    if (borrow != 0) {
-        u64 carry = 0;
-        for (int i = 0; i < 4; i++) out[i] = adc(out[i], MODULUS[i], &carry);
-    }
+    field_sub(a, b, MODULUS, out);
 }
 
 __device__ void fr_mul(const u64 *a, const u64 *b, u64 *out) {
-    u64 t[6];
-    for (int i = 0; i < 6; i++) t[i] = 0;
-
-    for (int i = 0; i < 4; i++) {
-        u64 carry = 0;
-        for (int j = 0; j < 4; j++) t[j] = mac(t[j], a[j], b[i], &carry);
-        u64 c = 0;
-        t[4] = adc(t[4], carry, &c);
-        t[5] = adc(t[5], 0, &c);
-
-        u64 m = t[0] * INV;
-        u64 c2 = 0;
-        mac(t[0], m, MODULUS[0], &c2);
-        for (int j = 1; j < 4; j++) t[j - 1] = mac(t[j], m, MODULUS[j], &c2);
-        u64 c3 = 0;
-        t[3] = adc(t[4], c2, &c3);
-        t[4] = adc(t[5], 0, &c3);
-        t[5] = 0;
-    }
-
-    for (int i = 0; i < 4; i++) out[i] = t[i];
-    if (t[4] != 0 || geq_modulus(out)) sub_modulus(out);
+    field_mont_mul(a, b, MODULUS, INV, out);
 }

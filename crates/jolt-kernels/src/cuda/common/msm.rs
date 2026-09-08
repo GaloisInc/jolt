@@ -3070,7 +3070,7 @@ pub(crate) mod testing {
     reason = "test module: device operations fail loudly"
 )]
 mod tests {
-    use ark_bn254::{Fr as ArkFr, G1Affine, G1Projective, G2Projective};
+    use ark_bn254::{Fq, Fr as ArkFr, G1Affine, G1Projective, G2Projective};
     use ark_ec::scalar_mul::glv::GLVConfig;
     use ark_ec::scalar_mul::variable_base::msm_i128;
     use ark_ec::{AdditiveGroup, AffineRepr, CurveGroup, PrimeGroup, VariableBaseMSM};
@@ -3405,6 +3405,55 @@ mod tests {
                 .expect("device g1_add_affine"),
         );
         assert_eq!(got_affine, expected);
+    }
+
+    #[test]
+    fn fq_arithmetic_carries_across_limb_and_modulus_boundaries() {
+        let Some(context) = device() else {
+            return;
+        };
+        let mut values = vec![Fq::zero(), fq_from_limbs([1, 0, 0, 0])];
+        let mut near_modulus = Fq::MODULUS.0;
+        near_modulus[0] -= 1;
+        values.push(fq_from_limbs(near_modulus));
+        for end in 1..FQ_LIMBS {
+            let mut below = [0; FQ_LIMBS];
+            below[..end].fill(u64::MAX);
+            let mut above = [0; FQ_LIMBS];
+            above[end] = 1;
+            values.extend([fq_from_limbs(below), fq_from_limbs(above)]);
+        }
+        let pairs: Vec<_> = values
+            .iter()
+            .flat_map(|&a| values.iter().map(move |&b| (a, b)))
+            .collect();
+        let left: Vec<_> = pairs.iter().map(|&(a, _)| fq_limbs(a)).collect();
+        let right: Vec<_> = pairs.iter().map(|&(_, b)| fq_limbs(b)).collect();
+        for (actual, expected) in [
+            (
+                context.fq_add(&left, &right).expect("add"),
+                pairs
+                    .iter()
+                    .map(|&(a, b)| fq_limbs(a + b))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                context.fq_sub(&left, &right).expect("sub"),
+                pairs
+                    .iter()
+                    .map(|&(a, b)| fq_limbs(a - b))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                context.fq_mul(&left, &right).expect("mul"),
+                pairs
+                    .iter()
+                    .map(|&(a, b)| fq_limbs(a * b))
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            assert_eq!(actual, expected);
+        }
     }
 
     proptest! {
