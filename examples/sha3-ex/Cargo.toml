@@ -8,7 +8,10 @@ jolt-sdk = { workspace = true, features = ["host"] }
 tracing-subscriber.workspace = true
 tracing.workspace = true
 jolt-inlines-keccak256 = { path = "../../jolt-inlines/keccak256", features = [
-    "host",
+  "host",
 ] }
 guest = { package = "sha3-guest", path = "./guest" }
 hex.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["jolt-inlines-keccak256"]

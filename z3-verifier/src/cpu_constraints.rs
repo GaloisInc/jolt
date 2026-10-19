@@ -1,16 +1,15 @@
 #![cfg(test)]
 #![allow(non_upper_case_globals)]
 
-use jolt_core::zkvm::{
-    instruction::{
-        CircuitFlags, Flags, InstructionFlags, NUM_CIRCUIT_FLAGS, NUM_INSTRUCTION_FLAGS,
-    },
-    r1cs::{
-        constraints::{ProductFactorExpr, PRODUCT_CONSTRAINTS, R1CS_CONSTRAINTS},
-        inputs::NUM_R1CS_INPUTS,
-        ops::LC,
-    },
-    witness::VirtualPolynomial,
+use crate::{Z3_RANDOM_SEED, Z3_TIMEOUT_MS};
+use jolt_claims::protocols::composed::r1cs::rv64::{
+    self, NUM_R1CS_INPUTS, NUM_VARS_PER_CYCLE, V_BRANCH, V_CONST, V_NEXT_IS_NOOP,
+};
+use jolt_field::{Fr, Ring};
+use jolt_r1cs::SparseRow;
+use jolt_riscv::{
+    CircuitFlags, Flags, InstructionFlags, JoltInstruction, CIRCUIT_FLAGS, NUM_CIRCUIT_FLAGS,
+    NUM_INSTRUCTION_FLAGS,
 };
 use std::{array, fmt::Write, str::FromStr};
 use tracer::instruction::{
@@ -26,12 +25,11 @@ use tracer::instruction::{
     blt::BLT,
     bltu::BLTU,
     bne::BNE,
-    ecall::ECALL,
     fence::FENCE,
     format::{
         format_assert_align::FormatAssert, format_b::FormatB, format_fence::FormatFence,
         format_i::FormatI, format_j::FormatJ, format_load::FormatLoad, format_r::FormatR,
-        format_s::FormatS, format_u::FormatU,
+        format_s::FormatS, format_t::FormatT, format_u::FormatU,
         format_virtual_right_shift_i::FormatVirtualRightShiftI,
         format_virtual_right_shift_r::FormatVirtualRightShiftR,
     },
@@ -57,9 +55,10 @@ use tracer::instruction::{
     virtual_assert_valid_div0::VirtualAssertValidDiv0,
     virtual_assert_valid_unsigned_remainder::VirtualAssertValidUnsignedRemainder,
     virtual_assert_word_alignment::VirtualAssertWordAlignment,
-    virtual_change_divisor::VirtualChangeDivisor,
     virtual_movsign::VirtualMovsign,
     virtual_muli::VirtualMULI,
+    virtual_muliw::VirtualMULIW,
+    virtual_negate_if::VirtualNegateIf,
     virtual_pow2::VirtualPow2,
     virtual_pow2_w::VirtualPow2W,
     virtual_pow2i::VirtualPow2I,
@@ -75,11 +74,10 @@ use tracer::instruction::{
     virtual_srli::VirtualSRLI,
     Instruction,
 };
-use z3::{ast::Int, SatResult, Solver};
+use z3::{ast::Int, Params, SatResult, Solver};
 
 #[derive(Clone, Debug)]
 struct JoltState<T = Int> {
-    // R1CS cycle inputs
     left_input: T,
     right_input: T,
     product: T,
@@ -102,11 +100,18 @@ struct JoltState<T = Int> {
     next_is_noop: T,
     should_jump: T,
     should_branch: T,
-    write_lookup_output_to_rd: T,
-    write_pc_to_rd: T,
     next_is_virtual: T,
     next_is_first_in_sequence: T,
     virtual_sequence_active: T,
+}
+
+fn signed_coefficient(value: &Fr) -> Int {
+    const COEFFICIENTS: [i128; 7] = [-(1i128 << 64), -4, -2, -1, 1, 2, 4];
+    let coefficient = COEFFICIENTS
+        .into_iter()
+        .find(|candidate| *value == Fr::from_i128(*candidate))
+        .unwrap_or_else(|| panic!("unsupported RV64 R1CS coefficient: {value:?}"));
+    Int::from_str(&coefficient.to_string()).unwrap()
 }
 
 impl JoltState {
@@ -136,10 +141,6 @@ impl JoltState {
             next_is_noop: Int::new_const(format!("{prefix}_next_is_noop")),
             should_jump: Int::new_const(format!("{prefix}_should_jump")),
             should_branch: Int::new_const(format!("{prefix}_should_branch")),
-            write_lookup_output_to_rd: Int::new_const(format!(
-                "{prefix}_write_lookup_output_to_rd_addr"
-            )),
-            write_pc_to_rd: Int::new_const(format!("{prefix}_write_pc_to_rd_addr")),
             next_is_virtual: Int::new_const(format!("{prefix}_next_is_virtual")),
             next_is_first_in_sequence: Int::new_const(format!(
                 "{prefix}_next_is_first_in_sequence"
@@ -149,12 +150,10 @@ impl JoltState {
     }
 
     fn r1cs_inputs(&self) -> [&Int; NUM_R1CS_INPUTS] {
-        [
+        let scalars = [
             &self.left_input,
             &self.right_input,
             &self.product,
-            &self.write_lookup_output_to_rd,
-            &self.write_pc_to_rd,
             &self.should_branch,
             &self.pc,
             &self.unexpanded_pc,
@@ -173,82 +172,41 @@ impl JoltState {
             &self.next_is_first_in_sequence,
             &self.lookup_output,
             &self.should_jump,
-            &self.flags[CircuitFlags::AddOperands as usize],
-            &self.flags[CircuitFlags::SubtractOperands as usize],
-            &self.flags[CircuitFlags::MultiplyOperands as usize],
-            &self.flags[CircuitFlags::Load as usize],
-            &self.flags[CircuitFlags::Store as usize],
-            &self.flags[CircuitFlags::Jump as usize],
-            &self.flags[CircuitFlags::WriteLookupOutputToRD as usize],
-            &self.flags[CircuitFlags::VirtualInstruction as usize],
-            &self.flags[CircuitFlags::Assert as usize],
-            &self.flags[CircuitFlags::DoNotUpdateUnexpandedPC as usize],
-            &self.flags[CircuitFlags::Advice as usize],
-            &self.flags[CircuitFlags::IsCompressed as usize],
-            &self.flags[CircuitFlags::IsFirstInSequence as usize],
-            &self.flags[CircuitFlags::IsLastInSequence as usize],
-        ]
+        ];
+        array::from_fn(|index| {
+            if index < scalars.len() {
+                scalars[index]
+            } else {
+                &self.flags[index - scalars.len()]
+            }
+        })
     }
 
-    fn lc_to_int(&self, lc: &LC) -> Int {
-        let mut result = lc
-            .const_term()
-            .map(|c| Int::from_str(&c.to_string()).unwrap())
-            .unwrap_or(Int::from_i64(0));
-        lc.for_each_term(|idx, coeff| {
-            let coeff: Int = Int::from_str(&coeff.to_string()).unwrap();
-            result += coeff * self.r1cs_inputs()[idx];
-        });
-        result
+    fn r1cs_vars(&self) -> [Int; NUM_VARS_PER_CYCLE] {
+        let inputs = self.r1cs_inputs();
+        array::from_fn(|index| match index {
+            V_CONST => Int::from(1),
+            V_BRANCH => self.instruction_flags[InstructionFlags::Branch as usize].clone(),
+            V_NEXT_IS_NOOP => self.next_is_noop.clone(),
+            _ => inputs[index - 1].clone(),
+        })
+    }
+
+    fn sparse_row_to_int(row: &SparseRow<Fr>, vars: &[Int; NUM_VARS_PER_CYCLE]) -> Int {
+        row.iter().fold(Int::from(0), |sum, (index, coefficient)| {
+            sum + signed_coefficient(coefficient) * &vars[*index]
+        })
     }
 
     fn add_r1cs_constraints(&self, solver: &mut Solver) {
-        R1CS_CONSTRAINTS.iter().for_each(|c| {
-            let lhs = self.lc_to_int(&c.cons.a) * self.lc_to_int(&c.cons.b);
-            *solver += lhs.eq(Int::from(0));
-        });
-    }
-
-    fn virtpoly_to_int(&self, poly: &VirtualPolynomial) -> &Int {
-        match poly {
-            VirtualPolynomial::LeftInstructionInput => &self.left_input,
-            VirtualPolynomial::RightInstructionInput => &self.right_input,
-            VirtualPolynomial::Product => &self.product,
-            VirtualPolynomial::InstructionFlags(InstructionFlags::IsRdNotZero) => {
-                &self.instruction_flags[InstructionFlags::IsRdNotZero as usize]
-            }
-            VirtualPolynomial::OpFlags(CircuitFlags::WriteLookupOutputToRD) => {
-                &self.flags[CircuitFlags::WriteLookupOutputToRD as usize]
-            }
-            VirtualPolynomial::WriteLookupOutputToRD => &self.write_lookup_output_to_rd,
-            VirtualPolynomial::OpFlags(CircuitFlags::Jump) => {
-                &self.flags[CircuitFlags::Jump as usize]
-            }
-            VirtualPolynomial::WritePCtoRD => &self.write_pc_to_rd,
-            VirtualPolynomial::LookupOutput => &self.lookup_output,
-            VirtualPolynomial::InstructionFlags(InstructionFlags::Branch) => {
-                &self.instruction_flags[InstructionFlags::Branch as usize]
-            }
-            VirtualPolynomial::ShouldBranch => &self.should_branch,
-            VirtualPolynomial::NextIsNoop => &self.next_is_noop,
-            VirtualPolynomial::ShouldJump => &self.should_jump,
-            _ => unreachable!(),
+        let matrices = rv64::rv64_trace_constraints::<Fr>();
+        let vars = self.r1cs_vars();
+        for ((a, b), c) in matrices.a.iter().zip(&matrices.b).zip(&matrices.c) {
+            let a = Self::sparse_row_to_int(a, &vars);
+            let b = Self::sparse_row_to_int(b, &vars);
+            let c = Self::sparse_row_to_int(c, &vars);
+            *solver += (a * b).eq(c);
         }
-    }
-
-    fn prodfac_to_int(&self, pf: ProductFactorExpr) -> Int {
-        match pf {
-            ProductFactorExpr::Var(poly) => self.virtpoly_to_int(&poly).clone(),
-            ProductFactorExpr::OneMinus(poly) => Int::from(1) - self.virtpoly_to_int(&poly),
-        }
-    }
-
-    fn add_product_constraints(&self, solver: &mut Solver) {
-        PRODUCT_CONSTRAINTS.iter().for_each(|c| {
-            let lhs = self.prodfac_to_int(c.left);
-            let rhs = self.prodfac_to_int(c.right);
-            *solver += (lhs * rhs).eq(self.virtpoly_to_int(&c.output));
-        });
     }
 
     fn add_input_constraints(&self, solver: &mut Solver) {
@@ -265,50 +223,61 @@ impl JoltState {
 
     fn add_constraints(&self, solver: &mut Solver) {
         self.add_r1cs_constraints(solver);
-        self.add_product_constraints(solver);
         self.add_input_constraints(solver);
     }
 
     fn assert_output_differs(&self, solver: &mut Solver, other: &Self) {
-        let or_terms = vec![
+        let mut or_terms = vec![
             // we are currently missing constraints on next_pc
             //(&self.next_pc).ne(&other.next_pc),
-            self.next_unexpanded_pc.ne(&other.next_unexpanded_pc),
-            // write to rd differs
-            self.instruction_flags[InstructionFlags::IsRdNotZero as usize]
-                .ne(&other.instruction_flags[InstructionFlags::IsRdNotZero as usize]),
-            &self.instruction_flags[InstructionFlags::IsRdNotZero as usize].eq(Int::from(1))
-                & (self.rd_write_value.ne(&other.rd_write_value)),
-            // lookup inputs differ
+            self.next_is_noop.eq(Int::from(0))
+                & self.next_unexpanded_pc.ne(&other.next_unexpanded_pc),
             self.left_lookup.ne(&other.left_lookup),
             self.right_lookup.ne(&other.right_lookup),
-            // write to ram differs
             self.ram_addr.ne(&other.ram_addr),
             (&self.ram_addr.ne(Int::from(0))) & self.ram_write_value.ne(&other.ram_write_value),
         ];
+        or_terms.push(
+            self.flags[CircuitFlags::WriteLookupOutputToRD as usize].eq(Int::from(1))
+                & self.rd_write_value.ne(&other.rd_write_value),
+        );
 
         *solver += or_terms.into_iter().reduce(|acc, t| acc | t).unwrap();
     }
 
     fn assert_input_matches(&self, solver: &mut Solver, instr: &Instruction, other: &Self) {
-        let flags = instr.circuit_flags();
-        let instruction_flags = instr.instruction_flags();
+        let row = instr
+            .try_jolt_instruction_row()
+            .expect("Z3 instruction constraints require a final Jolt row");
+        let instruction = JoltInstruction::from(row);
+        let flags = instruction.circuit_flags();
+        let instruction_flags = instruction.instruction_flags();
 
         self.flags
             .iter()
             .zip(other.flags.iter())
-            .zip(flags)
-            .for_each(|((self_flag, other_flag), flag_value)| {
+            .zip(CIRCUIT_FLAGS)
+            .for_each(|((self_flag, other_flag), flag)| {
+                let flag_value = flags.get(flag);
                 let flag_value = Int::from(flag_value as i64);
                 *solver += self_flag.eq(&flag_value);
                 *solver += other_flag.eq(&flag_value);
             });
 
+        const INSTRUCTION_FLAGS: [InstructionFlags; NUM_INSTRUCTION_FLAGS] = [
+            InstructionFlags::LeftOperandIsPC,
+            InstructionFlags::RightOperandIsImm,
+            InstructionFlags::LeftOperandIsRs1Value,
+            InstructionFlags::RightOperandIsRs2Value,
+            InstructionFlags::Branch,
+            InstructionFlags::IsNoop,
+        ];
         self.instruction_flags
             .iter()
             .zip(other.instruction_flags.iter())
-            .zip(instruction_flags)
-            .for_each(|((self_flag, other_flag), flag_value)| {
+            .zip(INSTRUCTION_FLAGS)
+            .for_each(|((self_flag, other_flag), flag)| {
+                let flag_value = instruction_flags.get(flag);
                 let flag_value = Int::from(flag_value as i64);
                 *solver += self_flag.eq(&flag_value);
                 *solver += other_flag.eq(&flag_value);
@@ -334,7 +303,17 @@ impl JoltState {
             .lookup_output
             .eq(&other.left_lookup + &other.right_lookup);
 
-        // Make an artificially memory, placing rv1 at address 8 and rv2 at address 16, rest is 0
+        if let Instruction::VirtualAdvice(instruction) = instr {
+            let zero = Int::from(0);
+            let advice = Int::from_str(&instruction.advice.to_string()).unwrap();
+            *solver += self.left_lookup.eq(&zero);
+            *solver += other.left_lookup.eq(&zero);
+            *solver += self.right_lookup.eq(&advice);
+            *solver += other.right_lookup.eq(&advice);
+            *solver += self.lookup_output.eq(&advice);
+            *solver += other.lookup_output.eq(&advice);
+        }
+
         let rv1 = Int::new_const("rv1");
         let rv2 = Int::new_const("rv2");
         let ram_expr = |addr: &Int| {
@@ -373,8 +352,6 @@ impl JoltState {
             next_is_noop: eval(&self.next_is_noop)?,
             should_jump: eval(&self.should_jump)?,
             should_branch: eval(&self.should_branch)?,
-            write_lookup_output_to_rd: eval(&self.write_lookup_output_to_rd)?,
-            write_pc_to_rd: eval(&self.write_pc_to_rd)?,
             next_is_virtual: eval(&self.next_is_virtual)?,
             next_is_first_in_sequence: eval(&self.next_is_first_in_sequence)?,
             virtual_sequence_active: eval(&self.virtual_sequence_active)?,
@@ -389,7 +366,6 @@ struct CompareResult {
 }
 
 impl JoltState<i64> {
-    /// Compare two states, returning lists of differing inputs and outputs
     fn compare(&self, other: &Self) -> (Vec<CompareResult>, Vec<CompareResult>) {
         macro_rules! cmp {
             ($vec:ident, $field:ident) => {
@@ -422,7 +398,12 @@ impl JoltState<i64> {
 }
 
 fn do_test(name: &str, instr: &Instruction) {
+    let mut solver_params = Params::default();
+    solver_params.set_u32("timeout", Z3_TIMEOUT_MS);
+    solver_params.set_u32("random_seed", Z3_RANDOM_SEED);
+
     let mut solver = Solver::new();
+    solver.set_params(&solver_params);
 
     let r1 = JoltState::new("r1".to_string());
     r1.add_constraints(&mut solver);
@@ -461,7 +442,7 @@ fn do_test(name: &str, instr: &Instruction) {
             panic!("{}", msg.trim());
         }
         SatResult::Unsat => (),
-        SatResult::Unknown => panic!("Solver failed"),
+        SatResult::Unknown => panic!("Solver failed/timed out, result inconclusive"),
     }
 }
 
@@ -474,7 +455,6 @@ macro_rules! test_instruction_constraints {
                 let instr = Instruction::$instr($instr {
                     operands: $crate::template_format!($operands),
                     $($field: $value,)*
-                    // unused by solver
                     address: 8,
                     is_compressed: false,
                     is_first_in_sequence: false,
@@ -498,7 +478,6 @@ test_instruction_constraints!(BGEU, FormatB);
 test_instruction_constraints!(BLT, FormatB);
 test_instruction_constraints!(BLTU, FormatB);
 test_instruction_constraints!(BNE, FormatB);
-test_instruction_constraints!(ECALL, FormatI);
 test_instruction_constraints!(FENCE, FormatFence);
 test_instruction_constraints!(JAL, FormatJ);
 test_instruction_constraints!(JALR, FormatI);
@@ -522,14 +501,15 @@ test_instruction_constraints!(VirtualAssertMulUNoOverflow, FormatB);
 test_instruction_constraints!(VirtualAssertValidDiv0, FormatB);
 test_instruction_constraints!(VirtualAssertValidUnsignedRemainder, FormatB);
 test_instruction_constraints!(VirtualAssertWordAlignment, FormatAssert);
-test_instruction_constraints!(VirtualChangeDivisor, FormatR);
+test_instruction_constraints!(VirtualNegateIf, FormatR);
 test_instruction_constraints!(VirtualMovsign, FormatI);
 test_instruction_constraints!(VirtualMULI, FormatI);
+test_instruction_constraints!(VirtualMULIW, FormatI);
 test_instruction_constraints!(VirtualPow2, FormatI);
 test_instruction_constraints!(VirtualPow2I, FormatJ);
 test_instruction_constraints!(VirtualPow2IW, FormatJ);
 test_instruction_constraints!(VirtualPow2W, FormatI);
-test_instruction_constraints!(VirtualRev8W, FormatI);
+test_instruction_constraints!(VirtualRev8W, FormatT);
 test_instruction_constraints!(VirtualROTRIW, FormatVirtualRightShiftI);
 test_instruction_constraints!(VirtualShiftRightBitmask, FormatI);
 test_instruction_constraints!(VirtualShiftRightBitmaskI, FormatJ);

@@ -4,18 +4,25 @@ use tracing::info;
 
 pub fn main() {
     tracing_subscriber::fmt::init();
+    let committed_bytecode = std::env::args().any(|arg| arg == "--committed-bytecode");
 
     let save_to_disk = std::env::args().any(|arg| arg == "--save");
 
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_fib(target_dir);
 
-    let shared_preprocessing = guest::preprocess_shared_fib(&mut program);
-
-    let prover_preprocessing = guest::preprocess_prover_fib(shared_preprocessing.clone());
-    let verifier_setup = prover_preprocessing.generators.to_verifier_setup();
-    let verifier_preprocessing =
-        guest::preprocess_verifier_fib(shared_preprocessing, verifier_setup);
+    let (prover_preprocessing, verifier_preprocessing) = if committed_bytecode {
+        let prover_preprocessing = guest::preprocess_committed_fib(&mut program).unwrap();
+        let verifier_preprocessing =
+            guest::verifier_preprocessing_from_prover_fib(&prover_preprocessing);
+        (prover_preprocessing, verifier_preprocessing)
+    } else {
+        let shared_preprocessing = guest::preprocess_shared_fib(&mut program).unwrap();
+        let prover_preprocessing = guest::preprocess_prover_fib(shared_preprocessing.clone());
+        let verifier_preprocessing =
+            guest::verifier_preprocessing_from_prover_fib(&prover_preprocessing);
+        (prover_preprocessing, verifier_preprocessing)
+    };
 
     if save_to_disk {
         serialize_and_print_size(

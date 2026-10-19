@@ -1,0 +1,276 @@
+//! The exhaustive id-indexed oracle surface of the trace backend.
+//!
+//! Both matches below are total over [`JoltPolynomialId`] with **no wildcard
+//! arm**: adding a variant in jolt-claims fails compilation here until the
+//! variant is mapped to a derivation or added to an explicit exclusion arm
+//! with its reason. The exclusion reasons are asserted in tests.
+
+use jolt_claims::protocols::jolt::{
+    JoltCommittedPolynomial, JoltPolynomialId, JoltVirtualPolynomial,
+};
+
+use super::*;
+#[cfg(feature = "field-inline")]
+use crate::field_inline::FieldInlineWitnessOracle;
+use crate::witnesses::{
+    BytecodeRaChunk, Imm, InstructionFlag, InstructionRaChunk, InstructionRafFlag,
+    LeftInstructionInput, LeftLookupOperand, LookupOutput, LookupTableFlag, NextIsFirstInSequence,
+    NextIsNoop, NextIsVirtual, NextPc, NextUnexpandedPc, OpFlag, Pc, Product, RamAddress,
+    RamHammingWeight, RamInc, RamRaChunk, RamReadValue, RamWriteValue, RdInc, RdWriteValue,
+    RightInstructionInput, RightLookupOperand, Rs1Value, Rs2Value, ShouldBranch, ShouldJump,
+    UnexpandedPc,
+};
+use crate::{JoltWitnessOracle, PolynomialEncoding, Shape};
+
+pub(crate) const COMMITTED_PROGRAM_REASON: &str =
+    "committed-program polynomial served from preprocessing, not the execution trace";
+pub(crate) const PROTOCOL_INTERMEDIATE_REASON: &str =
+    "protocol intermediate produced during proving, never served by a witness backend";
+pub(crate) const UNSERVED_REASON: &str =
+    "no consumer on the modular stack; no trace derivation is defined";
+
+fn not_served(id: JoltPolynomialId, reason: &'static str) -> WitnessError {
+    WitnessError::NotServed {
+        oracle: format!("{id:?}"),
+        reason,
+    }
+}
+
+impl JoltVmWitnessMetadata<'_> {
+    pub fn shape(&self, id: JoltPolynomialId) -> Result<Shape, WitnessError> {
+        use JoltCommittedPolynomial as C;
+        use JoltVirtualPolynomial as V;
+        use PolynomialEncoding::{Compact, Dense, OneHot};
+        match id {
+            JoltPolynomialId::Committed(committed) => match committed {
+                C::RdInc | C::RamInc => Ok(Shape::new(self.trace_log_rows(), Compact)),
+                C::InstructionRa(index) => {
+                    require_index(index, self.ra_layout()?.instruction())?;
+                    Ok(Shape::new(self.one_hot_log_rows()?, OneHot))
+                }
+                C::BytecodeRa(index) => {
+                    require_index(index, self.ra_layout()?.bytecode())?;
+                    Ok(Shape::new(self.one_hot_log_rows()?, OneHot))
+                }
+                C::RamRa(index) => {
+                    require_index(index, self.ra_layout()?.ram())?;
+                    Ok(Shape::new(self.one_hot_log_rows()?, OneHot))
+                }
+                C::TrustedAdvice => {
+                    if !self.config.include_trusted_advice {
+                        return Err(WitnessError::UnknownOracle {
+                            label: JOLT_VM_LABEL,
+                        });
+                    }
+                    Ok(Shape::new(
+                        Self::advice_log_rows(
+                            self.preprocessing.memory_layout.max_trusted_advice_size as usize,
+                        ),
+                        Compact,
+                    ))
+                }
+                C::UntrustedAdvice => {
+                    if !self.config.include_untrusted_advice {
+                        return Err(WitnessError::UnknownOracle {
+                            label: JOLT_VM_LABEL,
+                        });
+                    }
+                    Ok(Shape::new(
+                        Self::advice_log_rows(
+                            self.preprocessing.memory_layout.max_untrusted_advice_size as usize,
+                        ),
+                        Compact,
+                    ))
+                }
+                C::Reserved4(retired) => match retired {},
+                C::ProgramBytecode | C::ProgramImageInit => {
+                    Err(not_served(id, COMMITTED_PROGRAM_REASON))
+                }
+                C::BalancedIncDigit(index) => {
+                    require_index(index, self.balanced_inc_digit_count()?)?;
+                    Ok(Shape::new(self.one_hot_log_rows()?, OneHot))
+                }
+                C::BalancedIncCarry => Ok(Shape::new(self.one_hot_log_rows()?, OneHot)),
+            },
+            JoltPolynomialId::Virtual(virtual_id) => match virtual_id {
+                V::RamVal | V::RamRa => Ok(Shape::new(self.ram_read_write_log_rows()?, Dense)),
+                V::RegistersVal | V::Rs1Ra | V::Rs2Ra | V::RdWa => {
+                    Ok(Shape::new(self.register_read_write_log_rows()?, Dense))
+                }
+                V::RamValFinal => Ok(Shape::new(self.ram_log_k()?, Dense)),
+                V::InstructionRa(index) => {
+                    require_index(index, self.instruction_virtual_ra_count()?)?;
+                    Ok(Shape::new(self.instruction_virtual_ra_log_rows()?, Dense))
+                }
+                V::LookupTableFlag(index) => {
+                    require_index(index, LookupTableKind::<RV64_XLEN>::COUNT)?;
+                    Ok(Shape::new(self.trace_log_rows(), Dense))
+                }
+                V::PC
+                | V::UnexpandedPC
+                | V::NextPC
+                | V::NextUnexpandedPC
+                | V::NextIsNoop
+                | V::NextIsVirtual
+                | V::NextIsFirstInSequence
+                | V::LeftLookupOperand
+                | V::RightLookupOperand
+                | V::LeftInstructionInput
+                | V::RightInstructionInput
+                | V::Product
+                | V::ShouldJump
+                | V::ShouldBranch
+                | V::Imm
+                | V::Rs1Value
+                | V::Rs2Value
+                | V::RdWriteValue
+                | V::LookupOutput
+                | V::InstructionRafFlag
+                | V::RamAddress
+                | V::RamReadValue
+                | V::RamWriteValue
+                | V::RamHammingWeight
+                | V::OpFlags(_)
+                | V::InstructionFlags(_) => Ok(Shape::new(self.trace_log_rows(), Dense)),
+                V::Rd | V::InstructionRaf | V::RamValInit => Err(not_served(id, UNSERVED_REASON)),
+                V::UnivariateSkip
+                | V::BytecodeValClaim(_)
+                | V::BytecodeReadRafAddrClaim
+                | V::BooleanityAddrClaim
+                | V::BytecodeClaimReductionIntermediate
+                | V::ProgramImageInitContributionRw => {
+                    Err(not_served(id, PROTOCOL_INTERMEDIATE_REASON))
+                }
+                V::FusedInc => Ok(Shape::new(self.trace_log_rows(), Compact)),
+            },
+        }
+    }
+
+    fn balanced_inc_digit_count(&self) -> Result<usize, WitnessError> {
+        jolt_claims::protocols::jolt::lattice::BalancedIncChunking::new(
+            self.config.one_hot.committed_chunk_bits(),
+        )
+        .map(|chunking| chunking.chunk_count())
+        .map_err(|error| WitnessError::InvalidDimensions {
+            label: JOLT_VM_LABEL,
+            reason: error.to_string(),
+        })
+    }
+}
+
+impl<F: JoltField> JoltWitnessOracle<F> for TraceBackend {
+    fn shape(&self, id: JoltPolynomialId) -> Result<Shape, WitnessError> {
+        self.metadata().shape(id)
+    }
+
+    #[tracing::instrument(skip_all, name = "TraceBackend::oracle_table", fields(id = ?id))]
+    fn oracle_table(&self, id: JoltPolynomialId) -> Result<Vec<F>, WitnessError> {
+        use JoltCommittedPolynomial as C;
+        use JoltVirtualPolynomial as V;
+        // Validates presence and index ranges (and rejects excluded ids)
+        // before materialization, exactly like the arms below.
+        let _ = self.metadata().shape(id)?;
+        match id {
+            JoltPolynomialId::Committed(committed) => match committed {
+                C::RdInc => self.materialize_cycle::<F, RdInc>(),
+                C::RamInc => self.materialize_cycle::<F, RamInc>(),
+                C::InstructionRa(index) => self.materialize_one_hot::<F, InstructionRaChunk>(
+                    index,
+                    self.metadata().ra_layout()?.instruction(),
+                    self.config.one_hot.committed_chunk_bits(),
+                ),
+                C::BytecodeRa(index) => self.materialize_one_hot::<F, BytecodeRaChunk>(
+                    index,
+                    self.metadata().ra_layout()?.bytecode(),
+                    self.config.one_hot.committed_chunk_bits(),
+                ),
+                C::RamRa(index) => self.materialize_one_hot::<F, RamRaChunk>(
+                    index,
+                    self.metadata().ra_layout()?.ram(),
+                    self.config.one_hot.committed_chunk_bits(),
+                ),
+                C::TrustedAdvice => self.materialize_trusted_advice(),
+                C::UntrustedAdvice => self.materialize_untrusted_advice(),
+                C::Reserved4(retired) => match retired {},
+                C::ProgramBytecode | C::ProgramImageInit => {
+                    Err(not_served(id, COMMITTED_PROGRAM_REASON))
+                }
+                C::BalancedIncDigit(index) => self.materialize_balanced_inc_one_hot(
+                    crate::witnesses::BalancedIncColumn::Digit {
+                        width: self.config.one_hot.committed_chunk_bits(),
+                        index,
+                    },
+                ),
+                C::BalancedIncCarry => self.materialize_balanced_inc_one_hot(
+                    crate::witnesses::BalancedIncColumn::Carry {
+                        width: self.config.one_hot.committed_chunk_bits(),
+                    },
+                ),
+            },
+            JoltPolynomialId::Virtual(virtual_id) => match virtual_id {
+                V::RamVal | V::RamRa => self.materialize_ram_read_write_virtual(virtual_id),
+                V::RegistersVal | V::Rs1Ra | V::Rs2Ra | V::RdWa => {
+                    self.materialize_register_read_write_virtual(virtual_id)
+                }
+                V::RamValFinal => self.materialize_ram_val_final(),
+                V::InstructionRa(index) => self.materialize_one_hot::<F, InstructionRaChunk>(
+                    index,
+                    self.metadata().instruction_virtual_ra_count()?,
+                    self.config.one_hot.lookup_virtual_chunk_bits(),
+                ),
+                V::PC => self.materialize_cycle::<F, Pc>(),
+                V::UnexpandedPC => self.materialize_cycle::<F, UnexpandedPc>(),
+                V::NextPC => self.materialize_cycle::<F, NextPc>(),
+                V::NextUnexpandedPC => self.materialize_cycle::<F, NextUnexpandedPc>(),
+                V::NextIsNoop => self.materialize_cycle::<F, NextIsNoop>(),
+                V::NextIsVirtual => self.materialize_cycle::<F, NextIsVirtual>(),
+                V::NextIsFirstInSequence => self.materialize_cycle::<F, NextIsFirstInSequence>(),
+                V::LeftLookupOperand => self.materialize_cycle::<F, LeftLookupOperand>(),
+                V::RightLookupOperand => self.materialize_cycle::<F, RightLookupOperand>(),
+                V::LeftInstructionInput => self.materialize_cycle::<F, LeftInstructionInput>(),
+                V::RightInstructionInput => self.materialize_cycle::<F, RightInstructionInput>(),
+                V::Product => self.materialize_cycle::<F, Product>(),
+                V::ShouldJump => self.materialize_cycle::<F, ShouldJump>(),
+                V::ShouldBranch => self.materialize_cycle::<F, ShouldBranch>(),
+                V::Imm => self.materialize_cycle::<F, Imm>(),
+                V::Rs1Value => self.materialize_cycle::<F, Rs1Value>(),
+                V::Rs2Value => self.materialize_cycle::<F, Rs2Value>(),
+                V::RdWriteValue => self.materialize_cycle::<F, RdWriteValue>(),
+                V::LookupOutput => self.materialize_cycle::<F, LookupOutput>(),
+                V::InstructionRafFlag => self.materialize_cycle::<F, InstructionRafFlag>(),
+                V::RamAddress => self.materialize_cycle::<F, RamAddress>(),
+                V::RamReadValue => self.materialize_cycle::<F, RamReadValue>(),
+                V::RamWriteValue => self.materialize_cycle::<F, RamWriteValue>(),
+                V::RamHammingWeight => self.materialize_cycle::<F, RamHammingWeight>(),
+                V::OpFlags(flag) => self.materialize_cycle_indexed::<F, OpFlag, _>(flag),
+                V::InstructionFlags(flag) => {
+                    self.materialize_cycle_indexed::<F, InstructionFlag, _>(flag)
+                }
+                V::LookupTableFlag(table) => {
+                    self.materialize_cycle_indexed::<F, LookupTableFlag, _>(table)
+                }
+                V::Rd | V::InstructionRaf | V::RamValInit => Err(not_served(id, UNSERVED_REASON)),
+                V::UnivariateSkip
+                | V::BytecodeValClaim(_)
+                | V::BytecodeReadRafAddrClaim
+                | V::BooleanityAddrClaim
+                | V::BytecodeClaimReductionIntermediate
+                | V::ProgramImageInitContributionRw => {
+                    Err(not_served(id, PROTOCOL_INTERMEDIATE_REASON))
+                }
+                V::FusedInc => self.materialize_cycle::<F, crate::witnesses::FusedInc>(),
+            },
+        }
+    }
+
+    fn committed_order(&self) -> Result<Vec<JoltCommittedPolynomial>, WitnessError> {
+        self.committed_polynomial_order()
+    }
+
+    #[cfg(feature = "field-inline")]
+    fn field_inline(&self) -> Option<&dyn FieldInlineWitnessOracle<F>> {
+        self.field_inline
+            .as_ref()
+            .map(|witness| witness as &dyn FieldInlineWitnessOracle<F>)
+    }
+}

@@ -1,0 +1,624 @@
+//! The optimized RAM RA virtualization (stage 6b) kernel.
+//!
+//! The summand is `eq(r_cycle, j) · Π_i ra_i(chunk_i, j)` over the cycle
+//! domain. The reference kernel materializes every committed one-hot
+//! `(2^w × T)` RAM RA grid through `oracle_table` and address-folds it; this
+//! kernel is the RAM twin of
+//! [`instruction_ra_virtualization`](super::instruction_ra_virtualization):
+//!
+//! - **Point-mass address folding**: each committed `RamRa` chunk is a point
+//!   mass at that chunk of the cycle's remapped word address (cold on
+//!   no-access cycles), so the address-folded value is a single eq-table
+//!   lookup — `ra_i(r_chunk_i, j) = eq_table_i[chunk_i(address_j)]`, zero
+//!   when the cycle makes no access. `T` lookups per chunk, no grid.
+//! - **Shared address column**: [`SharedRamAddresses::shared`] supplies one
+//!   address column to the optimized RAM kernels.
+//! - **Gruen split-eq factoring**: `eq(r_cycle, ·)` is never materialized or
+//!   bound; each round emits `s(t) = ℓ(t) · Σ_y E(y) · Π_i ra_i(t, y)` at
+//!   a minimal product grid, recovering the missing value from the running
+//!   claim. Round polynomials and output claims are
+//!   byte-identical (field arithmetic is exact under any regrouping).
+
+use jolt_claims::protocols::jolt::geometry::dimensions::committed_address_chunks;
+use jolt_claims::protocols::jolt::relations::ram::RamRaVirtualizationOutputClaims;
+use jolt_claims::protocols::jolt::{JoltDerivedId, RamRaVirtualizationPublic};
+use jolt_field::{Accumulator, JoltField};
+use std::sync::Arc;
+
+use jolt_poly::{BindingOrder, GruenSplitEqPolynomial, UnivariatePoly};
+use jolt_sumcheck::{ProveRounds, SumcheckError};
+use jolt_verifier::stages::relations::{
+    ConcreteSumcheckChallenges, SumcheckInputClaims, SumcheckInputPoints, SumcheckOutputPoints,
+};
+use jolt_verifier::stages::stage6b::ram_ra_virtualization::RamRaVirtualization;
+use jolt_witness::JoltWitnessPlane;
+
+use super::lazy_ra::{ChunkIndexSource, LazyFoldedRa};
+use super::ram_trace::{SharedRamAddresses, NO_ACCESS};
+use super::support::{
+    accumulate_product_grid, pin_derived_term, product_grid_scratch_len, GruenRoundMessage,
+    RoundProgress, MAX_GRID_FACTORS,
+};
+use super::OptimizedBackend;
+use crate::reference::views::eq_table;
+use crate::{
+    KernelError, PrepareKernel, ProofSession, ProverInputs, SumcheckKernel, SumcheckKernelError,
+};
+
+impl<F: JoltField> PrepareKernel<F, RamRaVirtualization<F>> for OptimizedBackend {
+    fn prepare(
+        &self,
+        session: &mut ProofSession,
+        witness: &dyn JoltWitnessPlane<F>,
+        inputs: ProverInputs<'_, F, RamRaVirtualization<F>>,
+    ) -> Result<Box<dyn SumcheckKernel<F, Relation = RamRaVirtualization<F>>>, KernelError<F>> {
+        let relation = inputs.relation;
+        let dimensions = relation.dimensions();
+        let log_t = dimensions.log_t();
+        let ram_reduced_address = relation.ram_reduced_address();
+        let committed_chunk_bits = relation.committed_chunk_bits();
+        let chunks = committed_address_chunks(ram_reduced_address, committed_chunk_bits);
+        let num_committed = dimensions.num_committed_ra_polys();
+        if chunks.len() != num_committed {
+            return Err(KernelError::InvariantViolation {
+                reason: "RAM address chunk count disagrees with the committed RA count",
+            });
+        }
+        if committed_chunk_bits == 0 || committed_chunk_bits > 32 {
+            return Err(KernelError::Unsupported {
+                reason: "committed RAM RA chunk width outside the supported one-hot range",
+            });
+        }
+        if num_committed > MAX_GRID_FACTORS {
+            return Err(KernelError::Unsupported {
+                reason: "more committed RAM RA chunks than the product grid supports",
+            });
+        }
+        let ram_reduced_cycle = relation.ram_reduced_cycle();
+        if ram_reduced_cycle.len() != log_t {
+            return Err(KernelError::TableSizeMismatch {
+                table: "RAM RA reduced cycle point".to_owned(),
+                expected: log_t,
+                got: ram_reduced_cycle.len(),
+            });
+        }
+
+        let addresses = SharedRamAddresses::shared(session, witness, log_t)?;
+        // Last RAM consumer: release the session's address handle.
+        let _ = session.take::<SharedRamAddresses>();
+        super::ram_trace::validate_addresses(&addresses, 1usize << ram_reduced_address.len())?;
+
+        // One eq table per committed chunk point (each `2^w` entries); the
+        // point-mass fold stays lazy — one table lookup per accessed cycle —
+        // instead of materializing `N × T` dense selectors up front.
+        let chunk_tables: Vec<Vec<F>> = chunks.iter().map(|chunk| eq_table(chunk)).collect();
+        let folded_ra = LazyFoldedRa::new(
+            chunk_tables,
+            RamAddressChunks {
+                addresses,
+                num_committed,
+                committed_chunk_bits,
+            },
+        );
+
+        Ok(Box::new(RamRaVirtualizationKernel {
+            progress: RoundProgress::new(log_t),
+            folded_ra,
+            gruen: GruenSplitEqPolynomial::new(ram_reduced_cycle, BindingOrder::LowToHigh),
+        }))
+    }
+}
+
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
+struct RamAddressChunks {
+    addresses: Arc<Vec<u32>>,
+    num_committed: usize,
+    committed_chunk_bits: usize,
+}
+
+impl ChunkIndexSource for RamAddressChunks {
+    fn num_columns(&self) -> usize {
+        self.num_committed
+    }
+
+    fn cycles(&self) -> usize {
+        self.addresses.len()
+    }
+
+    #[inline]
+    fn index(&self, i: usize, j: usize) -> Option<usize> {
+        let address = self.addresses[j];
+        if address == NO_ACCESS {
+            return None;
+        }
+        let shift = (self.num_committed - 1 - i) * self.committed_chunk_bits;
+        let mask = (1u128 << self.committed_chunk_bits) - 1;
+        Some(((u128::from(address) >> shift) & mask) as usize)
+    }
+}
+
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
+struct RamRaVirtualizationKernel<F: JoltField> {
+    progress: RoundProgress,
+    /// Address-folded committed RA selectors, one per committed chunk:
+    /// `folded[i][j] = eq(r_chunk_i, chunk_i(address_j))`, 0 on no-access
+    /// cycles, served lazily off the shared columns for the first four
+    /// binds instead of `N × T` dense.
+    folded_ra: LazyFoldedRa<F, RamAddressChunks>,
+    gruen: GruenSplitEqPolynomial<F>,
+}
+
+impl<F: JoltField> RamRaVirtualizationKernel<F> {
+    /// `s(t) = ℓ(t) · q(t)` with `q(t) = Σ_y E(y) · Π_i ra_i(t, y)`,
+    /// evaluated on the grid `[1, …, N−1, ∞]` through
+    /// [`accumulate_product_grid`]: `e_in` rides in the first factor, so the
+    /// products accumulate unreduced across each inner block, and
+    /// [`GruenRoundMessage::checked_toom`] recovers `q(0)` from the running
+    /// claim, evaluating it directly only when the linear factor vanishes
+    /// at zero.
+    fn message(
+        &self,
+        round: usize,
+        previous_claim: F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        let num_committed = self.folded_ra.num_polys();
+        if num_committed < 2 {
+            return self.message_few_factors(round, previous_claim);
+        }
+        let folded_ra = &self.folded_ra;
+
+        struct Scratch<F: JoltField> {
+            lanes: Vec<F::Accumulator>,
+            pairs: Vec<(F, F)>,
+            evals: Vec<F>,
+            steps: Vec<F>,
+            grid: Vec<F>,
+        }
+
+        let block_lanes = self.gruen.par_fold_out_in(
+            || Scratch {
+                lanes: vec![F::Accumulator::default(); num_committed],
+                pairs: vec![(F::zero(), F::zero()); num_committed],
+                evals: vec![F::zero(); num_committed],
+                steps: vec![F::zero(); num_committed],
+                grid: vec![F::zero(); product_grid_scratch_len(num_committed)],
+            },
+            |scratch, row, _x_in, e_in| {
+                folded_ra.lo_hi_all(row, &mut scratch.pairs);
+                for ((&(lo, hi), eval), step) in scratch
+                    .pairs
+                    .iter()
+                    .zip(scratch.evals.iter_mut())
+                    .zip(scratch.steps.iter_mut())
+                {
+                    *eval = hi;
+                    *step = hi - lo;
+                }
+                scratch.evals[0] *= e_in;
+                scratch.steps[0] *= e_in;
+                accumulate_product_grid(
+                    &scratch.evals,
+                    &scratch.steps,
+                    &mut scratch.lanes,
+                    &mut scratch.grid,
+                );
+            },
+            |_x_out, e_out, scratch| {
+                let mut out = vec![F::Accumulator::default(); num_committed];
+                for (out, lane) in out.iter_mut().zip(scratch.lanes) {
+                    out.fmadd(e_out, lane.reduce());
+                }
+                out
+            },
+            |mut a, b| {
+                for (a, b) in a.iter_mut().zip(b) {
+                    a.merge(b);
+                }
+                a
+            },
+        );
+
+        let q_evals: Vec<F> = block_lanes.into_iter().map(|lane| lane.reduce()).collect();
+        self.gruen
+            .checked_toom(&q_evals, previous_claim, round, || {
+                self.gruen.par_fold_out_in(
+                    || {
+                        (
+                            vec![(F::zero(), F::zero()); num_committed],
+                            F::Accumulator::default(),
+                        )
+                    },
+                    |(pairs, sum), row, _, weight| {
+                        folded_ra.lo_hi_all(row, pairs);
+                        let value = pairs
+                            .iter()
+                            .fold(F::one(), |product, pair| product * pair.0);
+                        sum.fmadd(weight, value);
+                    },
+                    |_, weight, (_, sum)| weight * sum.reduce(),
+                    |a, b| a + b,
+                )
+            })
+    }
+
+    /// Fewer than two committed chunks: the grid needs `q(1)` among its
+    /// samples, so sample the summand explicitly at `t = 0, …, N + 1`.
+    fn message_few_factors(
+        &self,
+        round: usize,
+        previous_claim: F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        let num_committed = self.folded_ra.num_polys();
+        let points = num_committed + 2;
+
+        let mut q_evals = self.gruen.par_fold_out_in(
+            || vec![F::zero(); points],
+            |acc, row, _x_in, e_in| {
+                if num_committed == 0 {
+                    for value in acc.iter_mut() {
+                        *value += e_in;
+                    }
+                    return;
+                }
+                let (lo, hi) = self.folded_ra.lo_hi(0, row);
+                let step = hi - lo;
+                let mut eval = lo;
+                for value in acc.iter_mut() {
+                    *value += e_in * eval;
+                    eval += step;
+                }
+            },
+            |_x_out, e_out, mut acc| {
+                for value in &mut acc {
+                    *value *= e_out;
+                }
+                acc
+            },
+            |mut a, b| {
+                for (a, b) in a.iter_mut().zip(&b) {
+                    *a += *b;
+                }
+                a
+            },
+        );
+
+        self.gruen
+            .checked_round_poly(&mut q_evals, previous_claim, round)
+    }
+
+    fn bind(&mut self, challenge: F) {
+        self.gruen.bind(challenge);
+        self.folded_ra.bind(challenge);
+        self.progress.advance();
+    }
+}
+
+impl<F: JoltField> ProveRounds<F> for RamRaVirtualizationKernel<F> {
+    fn num_rounds(&self) -> usize {
+        self.progress.total()
+    }
+
+    fn prove_round(
+        &mut self,
+        bind: Option<F>,
+        round: usize,
+        previous_claim: F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        if let Some(challenge) = bind {
+            self.bind(challenge);
+        }
+        self.message(round, previous_claim)
+    }
+
+    fn finish_rounds(&mut self, bind: F) -> Result<(), SumcheckError<F>> {
+        self.bind(bind);
+        Ok(())
+    }
+}
+
+impl<F: JoltField> SumcheckKernel<F> for RamRaVirtualizationKernel<F> {
+    type Relation = RamRaVirtualization<F>;
+
+    fn output_claims(
+        &mut self,
+        _inputs: &SumcheckInputClaims<F, Self::Relation>,
+    ) -> Result<RamRaVirtualizationOutputClaims<F>, SumcheckKernelError<F>> {
+        self.progress.require_complete()?;
+        Ok(RamRaVirtualizationOutputClaims {
+            ram_ra: self.folded_ra.final_values(),
+        })
+    }
+
+    /// The Gruen scalar after full binding is the bound `EqCycle` value; pin
+    /// it to the verifier's `derive_output_term`, exactly as the naive tier's
+    /// materialized eq table is pinned.
+    fn validate_derived_tables(
+        &self,
+        relation: &Self::Relation,
+        input_points: &SumcheckInputPoints<F, Self::Relation>,
+        output_points: &SumcheckOutputPoints<F, Self::Relation>,
+        challenges: &ConcreteSumcheckChallenges<F, Self::Relation>,
+    ) -> Result<(), SumcheckKernelError<F>> {
+        self.progress.require_complete()?;
+        pin_derived_term(
+            relation,
+            JoltDerivedId::from(RamRaVirtualizationPublic::EqCycle),
+            input_points,
+            output_points,
+            challenges,
+            self.gruen.current_scalar(),
+        )
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test module")]
+mod tests {
+    use jolt_claims::protocols::jolt::geometry::ram::{
+        committed_ram_ra, RamRaVirtualizationDimensions,
+    };
+    use jolt_claims::protocols::jolt::relations::ram::RamRaVirtualizationInputClaims;
+    use jolt_claims::NoChallenges;
+    use jolt_field::{Fr, Ring};
+    use jolt_verifier::stages::relations::ConcreteSumcheck;
+    use jolt_verifier::VerifierError;
+
+    use super::super::parity::ExceptionalEq;
+    use super::super::testing::{
+        assert_parity, random_scalars, with_ram_fixture, FixtureShape, RamOp,
+    };
+    use super::*;
+    use crate::reference::views::address_fold;
+    use crate::ReferenceBackend;
+
+    const CHUNK_BITS: usize = 4;
+
+    fn run_parity(shape: FixtureShape, ops: Vec<RamOp>, seed: u64) {
+        run_parity_with(
+            shape,
+            ops,
+            seed,
+            None,
+            |reference, optimized, claim, inputs| {
+                assert_parity(reference, optimized, claim, inputs, seed);
+            },
+        );
+    }
+
+    type KernelBox = Box<dyn SumcheckKernel<Fr, Relation = RamRaVirtualization<Fr>>>;
+
+    fn run_parity_with(
+        shape: FixtureShape,
+        ops: Vec<RamOp>,
+        seed: u64,
+        exceptional: Option<ExceptionalEq>,
+        finish: impl FnOnce(KernelBox, KernelBox, Fr, &ProverInputs<'_, Fr, RamRaVirtualization<Fr>>),
+    ) {
+        with_ram_fixture(shape, ops, |witness| {
+            let log_k = shape.log_k();
+            let num_committed = log_k.div_ceil(CHUNK_BITS);
+            let ram_reduced_address = random_scalars(log_k, seed ^ 0xA0DE);
+            let ram_reduced_cycle = exceptional.map_or_else(
+                || random_scalars(shape.log_t, seed ^ 0xC1C1),
+                |case| case.point(shape.log_t, random_scalars(1, seed)[0]),
+            );
+            let relation = RamRaVirtualization::<Fr>::new(
+                RamRaVirtualizationDimensions::new(shape.log_t, num_committed),
+                ram_reduced_address.clone(),
+                ram_reduced_cycle.clone(),
+                CHUNK_BITS,
+            );
+
+            let chunks = committed_address_chunks(&ram_reduced_address, CHUNK_BITS);
+            let folded: Vec<Vec<Fr>> = chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| {
+                    address_fold(witness, committed_ram_ra(index), shape.log_t, chunk).unwrap()
+                })
+                .collect();
+            let eq_cycle = eq_table(&ram_reduced_cycle);
+            let input_claim: Fr = (0..1usize << shape.log_t)
+                .map(|j| {
+                    folded
+                        .iter()
+                        .fold(eq_cycle[j], |product, table| product * table[j])
+                })
+                .sum();
+            if exceptional.is_none() {
+                assert_ne!(input_claim, Fr::from_u64(0), "degenerate fixture");
+            }
+
+            let claims = RamRaVirtualizationInputClaims {
+                ram_ra_reduced: input_claim,
+            };
+            let points = RamRaVirtualizationInputClaims::<Vec<Fr>>::default();
+            let challenges = NoChallenges::default();
+            let inputs = ProverInputs {
+                relation: &relation,
+                claims: &claims,
+                points: &points,
+                challenges: &challenges,
+            };
+
+            let mut reference_session = ProofSession::default();
+            let reference = PrepareKernel::<Fr, _>::prepare(
+                &ReferenceBackend,
+                &mut reference_session,
+                witness,
+                ProverInputs {
+                    relation: &relation,
+                    claims: &claims,
+                    points: &points,
+                    challenges: &challenges,
+                },
+            )
+            .unwrap();
+            // Pre-warm the session so the kernel exercises the shared-columns
+            // reclaim path (the real pipeline parks them in stage 2).
+            let mut session = ProofSession::default();
+            let _ = SharedRamAddresses::shared::<Fr>(&mut session, witness, shape.log_t).unwrap();
+            let optimized = PrepareKernel::<Fr, _>::prepare(
+                &OptimizedBackend,
+                &mut session,
+                witness,
+                ProverInputs {
+                    relation: &relation,
+                    claims: &claims,
+                    points: &points,
+                    challenges: &challenges,
+                },
+            )
+            .unwrap();
+
+            finish(reference, optimized, input_claim, &inputs);
+        });
+    }
+
+    fn mixed_ops() -> Vec<RamOp> {
+        vec![
+            RamOp::Write { word: 3, post: 5 },
+            RamOp::Read { word: 3 },
+            RamOp::None,
+            RamOp::Write { word: 9, post: 4 },
+            RamOp::Read { word: 9 },
+            RamOp::None,
+            RamOp::Write { word: 3, post: 8 },
+            RamOp::Read { word: 15 },
+        ]
+    }
+
+    #[test]
+    fn parity_single_committed_chunk() {
+        run_parity(
+            FixtureShape {
+                log_t: 4,
+                ram_k: 16,
+            },
+            mixed_ops(),
+            431,
+        );
+    }
+
+    #[test]
+    fn parity_two_committed_chunks() {
+        run_parity(
+            FixtureShape {
+                log_t: 4,
+                ram_k: 256,
+            },
+            vec![
+                RamOp::Write { word: 3, post: 5 },
+                RamOp::Write { word: 200, post: 7 },
+                RamOp::Read { word: 200 },
+                RamOp::None,
+                RamOp::Read { word: 3 },
+                RamOp::Write { word: 63, post: 2 },
+            ],
+            433,
+        );
+    }
+
+    #[test]
+    fn parity_four_committed_chunks_past_lazy_materialization() {
+        run_parity(
+            FixtureShape {
+                log_t: 6,
+                ram_k: 1 << 16,
+            },
+            vec![
+                RamOp::Write { word: 3, post: 5 },
+                RamOp::Write {
+                    word: 0xabcd,
+                    post: 7,
+                },
+                RamOp::Read { word: 0xabcd },
+                RamOp::None,
+                RamOp::Read { word: 3 },
+                RamOp::Write {
+                    word: 0x1234,
+                    post: 2,
+                },
+            ],
+            439,
+        );
+    }
+
+    #[test]
+    fn parity_exceptional_eq_in_lazy_and_dense_virtualization() {
+        for ram_k in [256, 1 << 16] {
+            for case in ExceptionalEq::ALL {
+                run_parity_with(
+                    FixtureShape { log_t: 6, ram_k },
+                    mixed_ops(),
+                    449,
+                    Some(case),
+                    |reference, optimized, claim, inputs| {
+                        assert_parity(reference, optimized, claim, inputs, 449);
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_committed_chunks_prove_in_parity_and_fail_closed() {
+        let seed = 443;
+        run_parity_with(
+            FixtureShape { log_t: 3, ram_k: 1 },
+            vec![RamOp::None; 3],
+            seed,
+            None,
+            |mut reference, mut optimized, input_claim, inputs| {
+                let challenges = super::super::testing::drive_parity_rounds(
+                    reference.as_mut(),
+                    optimized.as_mut(),
+                    input_claim,
+                    inputs,
+                    seed,
+                );
+                let output_points = inputs
+                    .relation
+                    .derive_opening_points(&challenges, inputs.points)
+                    .unwrap();
+                for kernel in [reference, optimized] {
+                    let error = kernel
+                        .validate_derived_tables(
+                            inputs.relation,
+                            inputs.points,
+                            &output_points,
+                            inputs.challenges,
+                        )
+                        .unwrap_err();
+                    assert!(
+                        matches!(
+                            &error,
+                            SumcheckKernelError::Verifier(
+                                VerifierError::StageClaimPublicInputFailed { .. }
+                            )
+                        ),
+                        "expected the fail-closed public-input error, got {error:?}"
+                    );
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn parity_padded_chunk_count() {
+        // log_k = 6 with 4-bit chunks: `committed_address_chunks` front-pads
+        // the reduced address, so chunk 0 spans only two real address bits.
+        run_parity(
+            FixtureShape {
+                log_t: 3,
+                ram_k: 64,
+            },
+            vec![
+                RamOp::Write { word: 33, post: 9 },
+                RamOp::Read { word: 33 },
+                RamOp::Write { word: 5, post: 1 },
+            ],
+            439,
+        );
+    }
+}

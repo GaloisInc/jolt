@@ -1,0 +1,79 @@
+use super::*;
+
+impl TraceBackend {
+    pub(crate) fn materialize_register_read_write_virtual<F: JoltField>(
+        &self,
+        id: JoltVirtualPolynomial,
+    ) -> Result<Vec<F>, WitnessError> {
+        match id {
+            JoltVirtualPolynomial::RegistersVal
+            | JoltVirtualPolynomial::Rs1Ra
+            | JoltVirtualPolynomial::Rs2Ra
+            | JoltVirtualPolynomial::RdWa => {}
+            _ => {
+                return Err(WitnessError::UnknownOracle {
+                    label: JOLT_VM_LABEL,
+                });
+            }
+        }
+
+        let cycles = checked_pow2(self.config.log_t)?;
+        let register_count = checked_pow2(REGISTER_ADDRESS_BITS)?;
+        let mut values = jolt_utils::unsafe_allocate_zero_vec(checked_dense_grid_len::<F>(
+            register_count,
+            cycles,
+        )?);
+
+        if id == JoltVirtualPolynomial::RegistersVal {
+            let mut state = vec![0u64; register_count];
+            for cycle in 0..cycles {
+                for (register, value) in state.iter().copied().enumerate() {
+                    values[register * cycles + cycle] = F::from_u64(value);
+                }
+
+                let Some(row) = self.trace.trace.proof_rows().get(cycle) else {
+                    continue;
+                };
+                if let Some(register) = row.rd_index() {
+                    let register = usize::from(register);
+                    if register >= register_count {
+                        return Err(invalid_register_address(register as u8));
+                    }
+                    state[register] = row.rd_write_value();
+                }
+            }
+            return Ok(values);
+        }
+
+        for cycle in 0..cycles {
+            let Some(row) = self.trace.trace.proof_rows().get(cycle) else {
+                break;
+            };
+            let register = match id {
+                JoltVirtualPolynomial::Rs1Ra => row.rs1_index(),
+                JoltVirtualPolynomial::Rs2Ra => row.rs2_index(),
+                JoltVirtualPolynomial::RdWa => row.rd_index(),
+                _ => None,
+            };
+            if let Some(register) = register {
+                let register = usize::from(register);
+                if register >= register_count {
+                    return Err(invalid_register_address(register as u8));
+                }
+                values[register * cycles + cycle] = F::one();
+            }
+        }
+
+        Ok(values)
+    }
+}
+
+pub(crate) fn invalid_register_address(register: u8) -> WitnessError {
+    WitnessError::InvalidWitnessData {
+        label: JOLT_VM_LABEL,
+        reason: format!(
+            "register index {register} exceeds {}-bit register read-write domain",
+            REGISTER_ADDRESS_BITS
+        ),
+    }
+}

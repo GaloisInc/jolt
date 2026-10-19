@@ -5,25 +5,32 @@
 //! In a zkVM context without a debugger, EBREAK serves as a termination point.
 //! The emulator detects termination when PC doesn't change (prev_pc == pc).
 
+use crate::instruction::registers::i::RegisterStateI;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{declare_riscv_instr, emulator::cpu::Cpu};
 
-use super::{format::format_i::FormatI, RISCVInstruction, RISCVTrace};
+use super::{format::format_i::FormatI, Cycle, Instruction, RISCVInstruction, RISCVTrace};
 
 declare_riscv_instr!(
     name   = EBREAK,
-    mask   = 0xffffffff,  // Exact match
-    match  = 0x00100073,  // EBREAK encoding
+    mask   = 0xffffffff,
+    match  = 0x00100073,
     format = FormatI,
+    registers = RegisterStateI,
     ram    = ()
 );
 
 impl EBREAK {
-    fn exec(&self, cpu: &mut Cpu, _: &mut <EBREAK as RISCVInstruction>::RAMAccess) {
+    fn exec(&self, cpu: &mut Cpu, _: &mut <EBREAK as RISCVInstruction>::RamAccess) {
         // Don't advance PC - emulator will detect prev_pc == pc and terminate
         cpu.pc = self.address;
     }
 }
 
-impl RISCVTrace for EBREAK {}
+impl RISCVTrace for EBREAK {
+    fn trace(&self, cpu: &mut Cpu, trace: Option<&mut Vec<Cycle>>) {
+        super::trace_inline_sequence(&Instruction::from(*self), cpu, trace);
+    }
+}

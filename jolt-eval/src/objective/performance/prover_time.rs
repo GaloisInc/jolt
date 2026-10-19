@@ -1,0 +1,69 @@
+use jolt_host::Program;
+
+use crate::guests::{self, GuestConfig, GuestProgram, ProverPreprocessing};
+use crate::objective::Objective;
+
+pub struct ProverTimeSetup {
+    pub program: GuestProgram,
+    pub prover_pp: ProverPreprocessing,
+    pub input: Vec<u8>,
+}
+
+/// Benchmarks end-to-end prover time for a guest program.
+///
+/// Setup compiles the guest, traces to determine trace length,
+/// and preprocesses. Each iteration calls `prove`.
+#[derive(Default)]
+pub struct ProverTimeObjective<G: GuestConfig> {
+    guest: G,
+    name: String,
+}
+
+impl<G: GuestConfig> ProverTimeObjective<G> {
+    pub fn new(guest: G) -> Self {
+        let name = format!("{} prover time", guest.bench_name());
+        Self { guest, name }
+    }
+}
+
+impl<G: GuestConfig + 'static> Objective for ProverTimeObjective<G> {
+    type Setup = ProverTimeSetup;
+
+    fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    fn setup(&self) -> ProverTimeSetup {
+        let mc = self.guest.memory_config();
+        let input = self.guest.input();
+
+        let target_dir = std::env::temp_dir().join("jolt-eval-bench-targets");
+        let mut host_program = Program::new(self.guest.package());
+        if let Some(func) = self.guest.func() {
+            host_program.set_func(func);
+        }
+        host_program.set_memory_config(mc);
+        host_program.build(&target_dir.to_string_lossy());
+        let mut program = host_program;
+        let (_lazy_trace, trace, _memory, _io) = program.trace(&input, &[], &[]);
+        let max_trace_length = (trace.len() + 1).next_power_of_two();
+        drop(trace);
+
+        let prover_pp = guests::prover_preprocessing(&mut program, mc, max_trace_length);
+
+        ProverTimeSetup {
+            program,
+            prover_pp,
+            input,
+        }
+    }
+
+    fn run(&self, setup: ProverTimeSetup) {
+        let (_proof, _io) = guests::prove(&setup.program, &setup.prover_pp, &setup.input);
+        std::hint::black_box(());
+    }
+
+    fn units(&self) -> Option<&str> {
+        Some("s")
+    }
+}

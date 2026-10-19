@@ -1,0 +1,154 @@
+//! The stage 6 `InstructionRaVirtualization` cycle-phase sumcheck instance.
+//!
+//! Virtualizes the per-virtual reduced `InstructionRa` claims (from the stage-5
+//! instruction read-RAF) into the per-chunk committed `InstructionRa` openings
+//! that the stage-7 hamming-weight reduction consumes. Each produced opening
+//! shares the cycle suffix derived from this sumcheck; the address prefix is the
+//! stage-5 instruction address point. Its only public, `EqCycle`, ties the
+//! produced cycle to the stage-5 instruction read-RAF cycle.
+
+use jolt_claims::protocols::jolt::relations;
+pub use jolt_claims::protocols::jolt::relations::instruction::{
+    InstructionRaVirtualizationChallenges, InstructionRaVirtualizationInputClaims,
+    InstructionRaVirtualizationOutputClaims,
+};
+use jolt_claims::protocols::jolt::{
+    geometry::{
+        dimensions::committed_address_chunks, instruction::InstructionRaVirtualizationDimensions,
+    },
+    InstructionRaVirtualizationPublic, JoltDerivedId, JoltRelationId,
+};
+use jolt_claims::SymbolicSumcheck;
+use jolt_field::JoltField;
+use jolt_poly::try_eq_mle;
+
+use crate::stages::relations::ConcreteSumcheck;
+use crate::stages::stage5::{Stage5OutputClaims, Stage5OutputPoints};
+use crate::VerifierError;
+
+/// Wire the per-virtual reduced `InstructionRa` opening *values* from the stage-5
+/// instruction read-RAF. Clear-only.
+pub fn instruction_ra_virtualization_input_values_from_upstream<F: JoltField>(
+    stage5: &Stage5OutputClaims<F>,
+) -> InstructionRaVirtualizationInputClaims<F> {
+    InstructionRaVirtualizationInputClaims {
+        instruction_ra: stage5.instruction_read_raf.instruction_ra.clone(),
+    }
+}
+
+/// Wire the per-virtual reduced `InstructionRa` opening *points* from the stage-5
+/// instruction read-RAF. ZK-agnostic.
+pub fn instruction_ra_virtualization_input_points_from_upstream<F: JoltField>(
+    stage5: &Stage5OutputPoints<F>,
+) -> InstructionRaVirtualizationInputClaims<Vec<F>> {
+    InstructionRaVirtualizationInputClaims {
+        instruction_ra: stage5.instruction_read_raf.instruction_ra().to_vec(),
+    }
+}
+
+#[derive(Clone)]
+pub struct InstructionRaVirtualization<F: JoltField> {
+    symbolic: relations::instruction::RaVirtualization,
+    dimensions: InstructionRaVirtualizationDimensions,
+    /// The stage-5 instruction address point, chunked into the per-chunk committed
+    /// opening points.
+    instruction_address: Vec<F>,
+    /// The stage-5 instruction read-RAF cycle that `EqCycle` compares against.
+    instruction_read_raf_cycle: Vec<F>,
+    committed_chunk_bits: usize,
+}
+
+impl<F: JoltField> InstructionRaVirtualization<F> {
+    pub fn new(
+        dimensions: InstructionRaVirtualizationDimensions,
+        instruction_address: Vec<F>,
+        instruction_read_raf_cycle: Vec<F>,
+        committed_chunk_bits: usize,
+    ) -> Self {
+        Self {
+            symbolic: relations::instruction::RaVirtualization::new(dimensions),
+            dimensions,
+            instruction_address,
+            instruction_read_raf_cycle,
+            committed_chunk_bits,
+        }
+    }
+}
+
+fn public_input_failed(reason: impl ToString) -> VerifierError {
+    VerifierError::StageClaimPublicInputFailed {
+        stage: JoltRelationId::InstructionRaVirtualization,
+        reason: reason.to_string(),
+    }
+}
+
+impl<F: JoltField> InstructionRaVirtualization<F> {
+    pub fn dimensions(&self) -> InstructionRaVirtualizationDimensions {
+        self.dimensions
+    }
+
+    pub fn instruction_address(&self) -> &[F] {
+        &self.instruction_address
+    }
+
+    pub fn instruction_read_raf_cycle(&self) -> &[F] {
+        &self.instruction_read_raf_cycle
+    }
+
+    pub fn committed_chunk_bits(&self) -> usize {
+        self.committed_chunk_bits
+    }
+}
+
+impl<F: JoltField> ConcreteSumcheck<F> for InstructionRaVirtualization<F> {
+    type Symbolic = relations::instruction::RaVirtualization;
+
+    fn symbolic(&self) -> &Self::Symbolic {
+        &self.symbolic
+    }
+
+    fn derive_opening_points(
+        &self,
+        sumcheck_point: &[F],
+        _input_points: &InstructionRaVirtualizationInputClaims<Vec<F>>,
+    ) -> Result<InstructionRaVirtualizationOutputClaims<Vec<F>>, VerifierError> {
+        let r_cycle = sumcheck_point.iter().rev().copied().collect::<Vec<_>>();
+        let committed_instruction_ra =
+            committed_address_chunks(&self.instruction_address, self.committed_chunk_bits)
+                .into_iter()
+                .map(|chunk| [chunk.as_slice(), r_cycle.as_slice()].concat())
+                .collect();
+        Ok(InstructionRaVirtualizationOutputClaims {
+            committed_instruction_ra,
+        })
+    }
+
+    fn derive_output_term(
+        &self,
+        id: &JoltDerivedId,
+        _input_points: &InstructionRaVirtualizationInputClaims<Vec<F>>,
+        output_points: &InstructionRaVirtualizationOutputClaims<Vec<F>>,
+        _challenges: &InstructionRaVirtualizationChallenges<F>,
+    ) -> Result<F, VerifierError> {
+        let JoltDerivedId::InstructionRaVirtualization(InstructionRaVirtualizationPublic::EqCycle) =
+            id
+        else {
+            return Err(VerifierError::MissingStageClaimDerived { id: (*id).into() });
+        };
+        let log_t = self.dimensions.log_t();
+        let point = output_points
+            .committed_instruction_ra()
+            .first()
+            .ok_or_else(|| {
+                public_input_failed("instruction RA virtualization produced no openings")
+            })?;
+        let r_cycle = point
+            .len()
+            .checked_sub(log_t)
+            .and_then(|start| point.get(start..))
+            .ok_or_else(|| {
+                public_input_failed("instruction RA opening point shorter than log_t")
+            })?;
+        try_eq_mle(&self.instruction_read_raf_cycle, r_cycle).map_err(public_input_failed)
+    }
+}

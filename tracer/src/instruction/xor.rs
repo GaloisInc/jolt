@@ -1,3 +1,4 @@
+use crate::instruction::registers::r::RegisterStateR;
 use serde::{Deserialize, Serialize};
 
 use crate::{declare_riscv_instr, emulator::cpu::Cpu};
@@ -9,13 +10,16 @@ declare_riscv_instr!(
     mask   = 0xfe00707f,
     match  = 0x00004033,
     format = FormatR,
+    registers = RegisterStateR,
     ram    = ()
 );
 
 impl XOR {
-    fn exec(&self, cpu: &mut Cpu, _: &mut <XOR as RISCVInstruction>::RAMAccess) {
-        cpu.x[self.operands.rd as usize] =
-            cpu.sign_extend(cpu.x[self.operands.rs1 as usize] ^ cpu.x[self.operands.rs2 as usize]);
+    fn exec(&self, cpu: &mut Cpu, _: &mut <XOR as RISCVInstruction>::RamAccess) {
+        cpu.write_register(
+            self.operands.rd as usize,
+            cpu.sign_extend(cpu.x[self.operands.rs1 as usize] ^ cpu.x[self.operands.rs2 as usize]),
+        );
     }
 }
 

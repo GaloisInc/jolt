@@ -1,0 +1,17 @@
+[package]
+name = "jolt-r1cs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "R1CS constraint data structures for the Jolt proving system"
+
+[lints]
+workspace = true
+
+[dependencies]
+jolt-field = { path = "../jolt-field", default-features = false }
+serde = { workspace = true, features = ["alloc", "derive"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+jolt-field = { path = "../jolt-field", features = ["bn254"] }

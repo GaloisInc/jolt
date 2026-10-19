@@ -1,3 +1,4 @@
+use crate::instruction::registers::virtual_right_shift_i::RegisterStateVirtualRightShiftI;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -12,15 +13,19 @@ declare_riscv_instr!(
     mask = 0,
     match = 0,
     format = FormatVirtualRightShiftI,
+    registers = RegisterStateVirtualRightShiftI,
     ram = ()
 );
 
 impl VirtualSRLI {
-    fn exec(&self, cpu: &mut Cpu, _: &mut <VirtualSRLI as RISCVInstruction>::RAMAccess) {
+    fn exec(&self, cpu: &mut Cpu, _: &mut <VirtualSRLI as RISCVInstruction>::RamAccess) {
         let shift = self.operands.imm.trailing_zeros();
-        cpu.x[self.operands.rd as usize] = cpu.sign_extend(
-            cpu.unsigned_data(cpu.x[self.operands.rs1 as usize])
-                .wrapping_shr(shift) as i64,
+        cpu.write_register(
+            self.operands.rd as usize,
+            cpu.sign_extend(
+                cpu.unsigned_data(cpu.x[self.operands.rs1 as usize])
+                    .wrapping_shr(shift) as i64,
+            ),
         );
     }
 }

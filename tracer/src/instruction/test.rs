@@ -2,8 +2,9 @@ use core::panic::AssertUnwindSafe;
 use std::panic;
 
 use crate::emulator::cpu::Cpu;
-use crate::instruction::format::{InstructionFormat, InstructionRegisterState};
-use crate::instruction::NormalizedInstruction;
+use crate::instruction::registers::InstructionRegisterState;
+#[cfg(test)]
+use jolt_riscv::RV64IMAC_JOLT;
 
 #[cfg(test)]
 use super::{
@@ -18,7 +19,7 @@ use super::{
     subw::SUBW, sw::SW,
 };
 
-use super::{RISCVInstruction, RISCVTrace};
+use super::{Instruction, RISCVInstruction, RISCVTrace};
 
 use crate::emulator::terminal::DummyTerminal;
 
@@ -47,13 +48,101 @@ macro_rules! test_inline_sequences {
 test_inline_sequences!(
     AMOADDD, AMOADDW, AMOANDD, AMOANDW, AMOMAXD, AMOMAXUD, AMOMAXUW, AMOMAXW, AMOMIND, AMOMINUD,
     AMOMINUW, AMOMINW, AMOORD, AMOORW, AMOSWAPD, AMOSWAPW, AMOXORD, AMOXORW, LB, LBU, LH, LHU, LW,
-    LWU, SB, SH, SW, ADDIW, ADDW, DIV, DIVU, DIVUW, DIVW, MULH, MULHSU, MULW, REM, REMU, REMUW,
-    REMW, SLL, SLLI, SLLIW, SLLW, SRA, SRAI, SRAIW, SRAW, SRL, SRLI, SRLIW, SRLW, SUBW
+    LWU, SB, SH, SW, ADDIW, ADDW, DIVU, DIVUW, MULH, MULHSU, MULW, REMU, REMUW, SLL, SLLI, SLLIW,
+    SLLW, SRA, SRAI, SRAIW, SRAW, SRL, SRLI, SRLIW, SRLW, SUBW
+);
+
+#[cfg(test)]
+const SIGNED_DIVISION_EDGE_CASES: [(u64, u64); 5] = [
+    ((-37i64) as u64, 0),
+    (i64::MIN as u64, (-1i64) as u64),
+    (i64::MIN as u64, 1),
+    (37, i64::MIN as u64),
+    (0, (-7i64) as u64),
+];
+
+#[cfg(test)]
+const SIGNED_WORD_DIVISION_EDGE_CASES: [(u64, u64); 5] = [
+    (0xdead_beef_ffff_ffdb, 0x1234_5678_0000_0000),
+    (0xdead_beef_8000_0000, u64::MAX),
+    (0xdead_beef_8000_0000, 0x1234_5678_0000_0001),
+    (0xdead_beef_0000_0025, 0x1234_5678_8000_0000),
+    (0xabcd_ef01_0000_0000, 0x1234_5678_ffff_fff9),
+];
+
+macro_rules! test_signed_division_inline_sequence {
+    ($(($name:ident, $instr:ty, $cases:expr)),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                inline_sequence_trace_test::<$instr>();
+                inline_sequence_edge_trace_test::<$instr>($cases);
+            }
+        )*
+    };
+}
+
+test_signed_division_inline_sequence!(
+    (test_div_inline_sequence, DIV, &SIGNED_DIVISION_EDGE_CASES),
+    (test_rem_inline_sequence, REM, &SIGNED_DIVISION_EDGE_CASES),
+    (
+        test_divw_inline_sequence,
+        DIVW,
+        &SIGNED_WORD_DIVISION_EDGE_CASES
+    ),
+    (
+        test_remw_inline_sequence,
+        REMW,
+        &SIGNED_WORD_DIVISION_EDGE_CASES
+    ),
 );
 
 fn test_rng() -> StdRng {
     let seed = [0u8; 32];
     StdRng::from_seed(seed)
+}
+
+#[test]
+fn jolt_program_rv64_decode_matches_tracer_normalization() {
+    use crate::instruction::{uncompress_instruction, Instruction};
+
+    let address = DRAM_BASE;
+    let cases = [
+        (0x1234_50b7, false),
+        (0x1234_5097, false),
+        (0x0080_00ef, false),
+        (0x0000_80e7, false),
+        (0x0020_8063, false),
+        (0x0000_b183, false),
+        (0x0030_b023, false),
+        (0xfff1_0093, false),
+        (0x0010_809b, false),
+        (0x0020_81b3, false),
+        (0x0220_81b3, false),
+        (0x0020_81bb, false),
+        (0x0000_000f, false),
+        (0x0000_0073, false),
+        (0x0010_0073, false),
+        (0x3020_0073, false),
+        (0x3001_10f3, false),
+        (0x0000_10db, false),
+        (0x0020_802b, false),
+        (uncompress_instruction(0x107a), true),
+    ];
+
+    for (word, compressed) in cases {
+        let expected = Instruction::decode(word, address, compressed)
+            .unwrap()
+            .source_instruction();
+        let actual = jolt_program::image::decode::decode_instruction(
+            word,
+            address,
+            compressed,
+            RV64IMAC_JOLT,
+        )
+        .unwrap();
+        assert_eq!(actual, expected, "word={word:08x} compressed={compressed}");
+    }
 }
 
 pub fn inline_sequence_trace_test<I: RISCVInstruction + RISCVTrace + Copy>()
@@ -65,17 +154,17 @@ where
 
     for _ in 0..1000 {
         let instruction = I::random(&mut rng);
-        let instr: NormalizedInstruction = instruction.into();
-        let register_state =
-            <<I::Format as InstructionFormat>::RegisterState as InstructionRegisterState>::random(
-                &mut rng,
-                &instr.operands,
-            );
+        let concrete: Instruction = instruction.into();
+        let source = concrete.source_instruction();
+        let register_state = <I::RegisterState as InstructionRegisterState>::random(
+            &mut rng,
+            &source.row().operands,
+        );
 
         let mut original_cpu = Cpu::new(Box::new(DummyTerminal::default()));
         let memory_config = common::jolt_device::MemoryConfig {
             heap_size: TEST_MEMORY_CAPACITY,
-            program_size: Some(1024), // Set a small program size for tests
+            program_size: Some(1024),
             ..Default::default()
         };
         original_cpu.get_mut_mmu().jolt_device =
@@ -87,13 +176,10 @@ where
             Some(common::jolt_device::JoltDevice::new(&memory_config));
         virtual_cpu.get_mut_mmu().init_memory(TEST_MEMORY_CAPACITY);
 
-        // Initialize memory with test values for AMO operations
-        // Write some test values at aligned addresses throughout memory
         for i in 0..100 {
-            let offset = (i * 8) as u64; // 8-byte aligned offsets
+            let offset = (i * 8) as u64;
             if offset < TEST_MEMORY_CAPACITY {
                 let test_value = 0x12345678 + i;
-                // Store as doubleword for AMO.D instructions
                 let addr = DRAM_BASE + offset;
                 original_cpu
                     .mmu
@@ -106,19 +192,15 @@ where
             }
         }
 
-        let rs1 = instr.operands.rs1.unwrap_or(0) as usize;
-        if rs1 != 0 {
-            if let Some(rs1_val) = register_state.rs1_value() {
-                original_cpu.x[rs1] = rs1_val as i64;
-                virtual_cpu.x[rs1] = rs1_val as i64;
-            }
+        let rs1 = source.row().operands.rs1.unwrap_or(0) as usize;
+        if let Some(rs1_val) = register_state.rs1_value() {
+            original_cpu.write_register(rs1, rs1_val as i64);
+            virtual_cpu.write_register(rs1, rs1_val as i64);
         }
-        let rs2 = instr.operands.rs2.unwrap_or(0) as usize;
-        if rs2 != 0 {
-            if let Some(rs2_val) = register_state.rs2_value() {
-                original_cpu.x[rs2] = rs2_val as i64;
-                virtual_cpu.x[rs2] = rs2_val as i64;
-            }
+        let rs2 = source.row().operands.rs2.unwrap_or(0) as usize;
+        if let Some(rs2_val) = register_state.rs2_value() {
+            original_cpu.write_register(rs2, rs2_val as i64);
+            virtual_cpu.write_register(rs2, rs2_val as i64);
         }
 
         let mut ram_access = Default::default();
@@ -149,5 +231,46 @@ where
     }
     if non_panic == 0 {
         panic!("All of instructions panic at the execute function");
+    }
+}
+
+#[cfg(test)]
+fn inline_sequence_edge_trace_test<I: RISCVInstruction + RISCVTrace + Copy>(cases: &[(u64, u64)])
+where
+    Cycle: From<RISCVCycle<I>>,
+{
+    let word = I::MATCH | (3 << 7) | (1 << 15) | (2 << 20);
+    let instruction = I::new(word, DRAM_BASE, true, false);
+    let memory_config = common::jolt_device::MemoryConfig {
+        heap_size: TEST_MEMORY_CAPACITY,
+        program_size: Some(1024),
+        ..Default::default()
+    };
+
+    for &(rs1, rs2) in cases {
+        let mut original_cpu = Cpu::new(Box::new(DummyTerminal::default()));
+        original_cpu.get_mut_mmu().jolt_device =
+            Some(common::jolt_device::JoltDevice::new(&memory_config));
+        original_cpu.get_mut_mmu().init_memory(TEST_MEMORY_CAPACITY);
+        original_cpu.write_register(1, rs1 as i64);
+        original_cpu.write_register(2, rs2 as i64);
+
+        let mut virtual_cpu = Cpu::new(Box::new(DummyTerminal::default()));
+        virtual_cpu.get_mut_mmu().jolt_device =
+            Some(common::jolt_device::JoltDevice::new(&memory_config));
+        virtual_cpu.get_mut_mmu().init_memory(TEST_MEMORY_CAPACITY);
+        virtual_cpu.write_register(1, rs1 as i64);
+        virtual_cpu.write_register(2, rs2 as i64);
+
+        instruction.execute(&mut original_cpu, &mut Default::default());
+        instruction.trace(&mut virtual_cpu, Some(&mut Vec::new()));
+
+        assert_eq!(original_cpu.pc, virtual_cpu.pc);
+        for register in 0..RISCV_REGISTER_COUNT {
+            assert_eq!(
+                original_cpu.x[register as usize], virtual_cpu.x[register as usize],
+                "register={register}, rs1={rs1:#018x}, rs2={rs2:#018x}"
+            );
+        }
     }
 }

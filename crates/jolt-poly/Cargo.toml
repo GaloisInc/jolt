@@ -1,0 +1,47 @@
+[package]
+name = "jolt-poly"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/a16z/jolt"
+description = "Polynomial types and operations for the Jolt zkVM"
+keywords = ["cryptography", "polynomial", "multilinear", "sumcheck", "zkvm"]
+categories = ["cryptography", "mathematics"]
+
+[lints]
+workspace = true
+
+[dependencies]
+allocative = { workspace = true, optional = true }
+jolt-field = { path = "../jolt-field", default-features = false }
+jolt-utils = { workspace = true }
+jolt-transcript = { path = "../jolt-transcript", default-features = false, optional = true }
+serde = { workspace = true, features = ["derive", "alloc"] }
+tracing.workspace = true
+rayon = { workspace = true, optional = true }
+rand_core = { workspace = true }
+num-traits = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+jolt-field = { workspace = true, features = ["bn254", "solinas"] }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+bincode = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "poly_ops"
+harness = false
+
+[package.metadata.cargo-machete]
+ignored = ["rand"]
+
+[features]
+default = ["parallel"]
+parallel = ["rayon"]
+# Heap visitation of this crate's tables for the profile harness.
+# Forwards to jolt-field so `F: JoltField` implies `F: Allocative`; without
+# it this crate's field-generic derives cannot discharge their scalar bound.
+allocative = ["dep:allocative", "jolt-field/allocative"]
+transcript = ["dep:jolt-transcript"]

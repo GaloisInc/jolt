@@ -1,11 +1,42 @@
-use ark_serialize::CanonicalDeserialize;
-use ark_serialize::CanonicalSerialize;
 use clap::{Parser, Subcommand};
-use jolt_sdk::{JoltDevice, MemoryConfig, RV64IMACProof, Serializable};
+use jolt_sdk::host::Program;
+use jolt_sdk::ProgramPreprocessingMode;
+use jolt_sdk::{
+    JoltDevice, JoltProverPreprocessing, JoltVerifierPreprocessing, MemoryConfig, RV64IMACProof,
+};
+use serde::{de::DeserializeOwned, Serialize};
 use std::cmp::PartialEq;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{error, info};
+
+fn push_record<T: Serialize>(buffer: &mut Vec<u8>, value: &T) {
+    let bytes = bincode::serde::encode_to_vec(value, bincode::config::standard()).unwrap();
+    let len = u64::try_from(bytes.len()).unwrap();
+    buffer.extend_from_slice(&len.to_le_bytes());
+    buffer.extend_from_slice(&bytes);
+}
+
+fn read_record<T: DeserializeOwned>(buffer: &[u8], offset: &mut usize) -> Result<T, String> {
+    if buffer.len().saturating_sub(*offset) < 8 {
+        return Err("missing record length prefix".to_string());
+    }
+    let mut len_bytes = [0u8; 8];
+    len_bytes.copy_from_slice(&buffer[*offset..*offset + 8]);
+    *offset += 8;
+
+    let len = usize::try_from(u64::from_le_bytes(len_bytes)).unwrap();
+    if buffer.len().saturating_sub(*offset) < len {
+        return Err("truncated serialized record".to_string());
+    }
+    let end = *offset + len;
+    let (value, consumed) =
+        bincode::serde::decode_from_slice(&buffer[*offset..end], bincode::config::standard())
+            .map_err(|error| error.to_string())?;
+    assert_eq!(consumed, len, "record decoder left trailing bytes");
+    *offset = end;
+    Ok(value)
+}
 
 fn get_guest_src_dir() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -31,6 +62,9 @@ enum Commands {
         /// Working directory for output files
         #[arg(long, value_name = "DIRECTORY", default_value = "output")]
         workdir: PathBuf,
+        /// Use committed program mode for the inner guest proof
+        #[arg(long)]
+        committed_bytecode: bool,
     },
     /// Verify proofs and optionally embed them
     Verify {
@@ -226,36 +260,32 @@ fn generate_provable_macro(guest: GuestProgram, use_embed: bool, output_dir: &Pa
 fn check_data_integrity(all_groups_data: &[u8]) -> (u32, u32) {
     info!("Checking data integrity...");
 
-    let mut cursor = std::io::Cursor::new(all_groups_data);
-
-    let verifier_preprocessing =
-        jolt_sdk::JoltVerifierPreprocessing::<jolt_sdk::F, jolt_sdk::PCS>::deserialize_compressed(
-            &mut cursor,
-        )
-        .unwrap();
-    let verifier_bytes = verifier_preprocessing.serialize_to_bytes().unwrap();
+    let mut offset = 0;
+    let verifier_preprocessing: JoltVerifierPreprocessing =
+        read_record(all_groups_data, &mut offset).unwrap();
+    let verifier_bytes =
+        bincode::serde::encode_to_vec(&verifier_preprocessing, bincode::config::standard())
+            .unwrap();
     info!(
         "✓ Verifier preprocessing deserialized successfully ({} bytes)",
         verifier_bytes.len()
     );
 
-    let n = u32::deserialize_compressed(&mut cursor).unwrap();
+    let n: u32 = read_record(all_groups_data, &mut offset).unwrap();
     info!("✓ Number of proofs deserialized: {n}");
 
     for i in 0..n {
-        match RV64IMACProof::deserialize_compressed(&mut cursor) {
+        match read_record::<RV64IMACProof>(all_groups_data, &mut offset) {
             Ok(_) => info!("✓ Proof {i} deserialized"),
             Err(e) => error!("✗ Failed to deserialize proof {i}: {e:?}"),
         }
-        match JoltDevice::deserialize_compressed(&mut cursor) {
+        match read_record::<JoltDevice>(all_groups_data, &mut offset) {
             Ok(_) => info!("✓ Device {i} deserialized"),
             Err(e) => error!("✗ Failed to deserialize device {i}: {e:?}"),
         }
     }
 
-    let position = cursor.position() as usize;
-    let all_data = cursor.into_inner();
-    let remaining_data: Vec<u8> = all_data[position..].to_vec();
+    let remaining_data: Vec<u8> = all_groups_data[offset..].to_vec();
     info!("✓ Remaining data size: {} bytes", remaining_data.len());
 
     assert_eq!(
@@ -267,7 +297,21 @@ fn check_data_integrity(all_groups_data: &[u8]) -> (u32, u32) {
     (n, remaining_data.len() as u32)
 }
 
-fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) -> Vec<u8> {
+fn preprocess_guest_prover(
+    guest_prog: &mut Program,
+    memory_config: MemoryConfig,
+    max_trace_length: usize,
+    mode: ProgramPreprocessingMode,
+) -> JoltProverPreprocessing {
+    jolt_sdk::preprocess_program(guest_prog, memory_config, max_trace_length, mode).unwrap()
+}
+
+fn collect_guest_proofs(
+    guest: GuestProgram,
+    target_dir: &str,
+    use_embed: bool,
+    mode: ProgramPreprocessingMode,
+) -> Vec<u8> {
     info!("Starting collect_guest_proofs for {}", guest.name());
     let max_trace_length = guest.get_max_trace_length(use_embed);
 
@@ -285,31 +329,23 @@ fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) 
     info!("Building program...");
     program.build(target_dir);
     info!("Getting ELF contents...");
-    let elf_contents = program.get_elf_contents().unwrap();
-    info!("Creating guest program...");
-    let mut guest_prog = jolt_sdk::guest::program::Program::new(&elf_contents, &memory_config);
-    guest_prog.elf = program.elf;
-
     info!("Preprocessing guest prover...");
     let guest_prover_preprocessing =
-        jolt_sdk::guest::prover::preprocess(&guest_prog, max_trace_length);
+        preprocess_guest_prover(&mut program, memory_config, max_trace_length, mode);
     info!("Preprocessing guest verifier...");
     let guest_verifier_preprocessing =
-        jolt_sdk::JoltVerifierPreprocessing::from(&guest_prover_preprocessing);
+        jolt_sdk::verifier_preprocessing_from_prover(&guest_prover_preprocessing);
 
     let inputs = guest.inputs();
     info!("Got inputs: {inputs:?}");
 
     let mut all_groups_data = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut all_groups_data);
     let mut total_prove_time = 0.0;
 
-    guest_verifier_preprocessing
-        .serialize_compressed(&mut cursor)
-        .unwrap();
+    push_record(&mut all_groups_data, &guest_verifier_preprocessing);
 
     let n = inputs.len() as u32;
-    u32::serialize_compressed(&n, &mut cursor).unwrap();
+    push_record(&mut all_groups_data, &n);
 
     info!("Starting {} recursion with {}", guest.name(), n);
 
@@ -318,30 +354,23 @@ fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) 
 
         let now = Instant::now();
 
-        let mut output_bytes = vec![0; 4096];
-
         // Running tracing allows things like JOLT_BACKTRACE=1 to work properly
         info!("  Tracing...");
-        guest_prog.memory_config.program_size = Some(
-            guest_verifier_preprocessing
-                .shared
-                .memory_layout
-                .program_size,
-        );
-        let (_, _, _, device_io) = guest_prog.trace(&input_bytes, &[], &[]);
+        let (_, _, _, device_io) = program.trace(&input_bytes, &[], &[]);
         assert!(!device_io.panic, "Guest program panicked during tracing");
 
         info!("  Proving...");
-        let (proof, io_device, _debug): (RV64IMACProof, _, _) = jolt_sdk::guest::prover::prove(
-            &guest_prog,
+        let (proof, io_device): (RV64IMACProof, _) = jolt_sdk::prove_program(
+            &program,
+            &guest_prover_preprocessing,
             &input_bytes,
             &[],
             &[],
             None,
             None,
-            &mut output_bytes,
-            &guest_prover_preprocessing,
-        );
+            None,
+        )
+        .expect("prover should produce verifier-native proof");
         let prove_time = now.elapsed().as_secs_f64();
         total_prove_time += prove_time;
         info!(
@@ -349,17 +378,16 @@ fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) 
             &input_bytes, prove_time
         );
 
-        proof.serialize_compressed(&mut cursor).unwrap();
-        io_device.serialize_compressed(&mut cursor).unwrap();
+        push_record(&mut all_groups_data, &proof);
+        push_record(&mut all_groups_data, &io_device);
 
         info!("  Verifying...");
-        let is_valid = jolt_sdk::guest::verifier::verify(
-            &input_bytes,
-            None,
-            &output_bytes,
-            proof,
-            &guest_verifier_preprocessing,
-        )
+        let is_valid = jolt_sdk::jolt_verifier::verify::<
+            jolt_sdk::VerifierField,
+            jolt_sdk::VerifierPCS,
+            jolt_sdk::VerifierVC,
+            jolt_sdk::VerifierTranscript,
+        >(&guest_verifier_preprocessing, &io_device, &proof, None)
         .is_ok();
         info!("  Verification result: {is_valid}");
     }
@@ -448,15 +476,13 @@ fn load_proof_data(guest: GuestProgram, workdir: &Path) -> Vec<u8> {
     proof_data
 }
 
-fn generate_proofs(guest: GuestProgram, workdir: &Path) {
+fn generate_proofs(guest: GuestProgram, workdir: &Path, mode: ProgramPreprocessingMode) {
     info!("Generating proofs for {} guest program...", guest.name());
 
     let target_dir = "/tmp/jolt-guest-targets";
 
-    // Collect guest proofs
-    let all_groups_data = collect_guest_proofs(guest, target_dir, false);
+    let all_groups_data = collect_guest_proofs(guest, target_dir, false, mode);
 
-    // Save proof data
     save_proof_data(guest, &all_groups_data, workdir);
 
     info!("Proof generation completed for {}", guest.name());
@@ -476,67 +502,53 @@ fn run_recursion_proof(
     program.set_std(true);
     program.set_memory_config(memory_config);
     program.build(target_dir);
-    let elf_contents = program.get_elf_contents().unwrap();
-    let mut recursion = jolt_sdk::guest::program::Program::new(&elf_contents, &memory_config);
-    recursion.elf = program.elf;
-
     if run_config == RunConfig::Trace || run_config == RunConfig::TraceToFile {
         // shorten the max_trace_length for tracing only. Speeds up setup time for tracing purposes.
         max_trace_length = 0;
     }
-    let recursion_prover_preprocessing =
-        jolt_sdk::guest::prover::preprocess(&recursion, max_trace_length);
-    let recursion_verifier_preprocessing =
-        jolt_sdk::JoltVerifierPreprocessing::from(&recursion_prover_preprocessing);
-
-    // update program_size in memory_config now that we know it
-    recursion.memory_config.program_size = Some(
-        recursion_verifier_preprocessing
-            .shared
-            .memory_layout
-            .program_size,
+    let recursion_prover_preprocessing = preprocess_guest_prover(
+        &mut program,
+        memory_config,
+        max_trace_length,
+        ProgramPreprocessingMode::Full,
     );
+    let recursion_verifier_preprocessing =
+        jolt_sdk::verifier_preprocessing_from_prover(&recursion_prover_preprocessing);
 
-    let mut output_bytes = vec![
-        0;
-        recursion_verifier_preprocessing
-            .shared
-            .memory_layout
-            .max_output_size as usize
-    ];
     match run_config {
         RunConfig::Prove => {
-            let (proof, _io_device, _debug): (RV64IMACProof, _, _) = jolt_sdk::guest::prover::prove(
-                &recursion,
-                &input_bytes,
-                &[],
-                &[],
-                None,
-                None,
-                &mut output_bytes,
+            let (proof, io_device): (RV64IMACProof, _) = jolt_sdk::prove_program(
+                &program,
                 &recursion_prover_preprocessing,
-            );
-            let is_valid = jolt_sdk::guest::verifier::verify(
                 &input_bytes,
+                &[],
+                &[],
                 None,
-                &output_bytes,
-                proof,
-                &recursion_verifier_preprocessing,
+                None,
+                None,
             )
-            .is_ok();
-            let rv = postcard::from_bytes::<u32>(&output_bytes).unwrap();
+            .expect("prover should produce verifier-native proof");
+            let is_valid =
+                jolt_sdk::jolt_verifier::verify::<
+                    jolt_sdk::VerifierField,
+                    jolt_sdk::VerifierPCS,
+                    jolt_sdk::VerifierVC,
+                    jolt_sdk::VerifierTranscript,
+                >(&recursion_verifier_preprocessing, &io_device, &proof, None)
+                .is_ok();
+            let rv = postcard::from_bytes::<u32>(&io_device.outputs).unwrap();
             info!("  Recursion verification result: {rv}");
             info!("  Recursion verification result: {is_valid}");
         }
         RunConfig::Trace => {
             info!("  Trace-only mode: Skipping proof generation and verification.");
-            let (_, _, _, io_device) = recursion.trace(&input_bytes, &[], &[]);
+            let (_, _, _, io_device) = program.trace(&input_bytes, &[], &[]);
             let rv = postcard::from_bytes::<u32>(&io_device.outputs).unwrap_or(0);
             info!("  Recursion output (trace-only): {rv}");
         }
         RunConfig::TraceToFile => {
             info!("  Trace-only mode: Skipping proof generation and verification. Tracing to file: /tmp/{}.trace", guest.name());
-            let (_, io_device) = recursion.trace_to_file(
+            let (_, io_device) = program.trace_to_file(
                 &input_bytes,
                 &[],
                 &[],
@@ -619,7 +631,11 @@ fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::Generate { example, workdir }) => {
+        Some(Commands::Generate {
+            example,
+            workdir,
+            committed_bytecode,
+        }) => {
             let guest = match GuestProgram::from_str(example) {
                 Some(guest) => guest,
                 None => {
@@ -627,7 +643,15 @@ fn main() {
                     return;
                 }
             };
-            generate_proofs(guest, workdir);
+            generate_proofs(
+                guest,
+                workdir,
+                if *committed_bytecode {
+                    ProgramPreprocessingMode::Committed
+                } else {
+                    ProgramPreprocessingMode::Full
+                },
+            );
         }
         Some(Commands::Verify {
             example,
@@ -687,6 +711,7 @@ fn main() {
             info!("Examples:");
             info!("  cargo run --release -- generate --example fibonacci");
             info!("  cargo run --release -- generate --example fibonacci --workdir ./output");
+            info!("  cargo run --release -- generate --example fibonacci --committed-bytecode");
             info!("  cargo run --release -- verify --example fibonacci");
             info!("  cargo run --release -- verify --example fibonacci --workdir ./output --embed");
             info!("  cargo run --release -- trace --example fibonacci --embed");
