@@ -1,0 +1,56 @@
+[package]
+name = "jolt-dory"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Dory commitment scheme implementation for the Jolt zkVM"
+
+[lints]
+workspace = true
+
+[dependencies]
+jolt-crypto = { workspace = true }
+jolt-field = { workspace = true }
+jolt-openings = { workspace = true }
+jolt-poly = { workspace = true }
+jolt-transcript = { workspace = true }
+dory = { workspace = true }
+jolt-optimizations = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-serialize = { workspace = true }
+
+[features]
+cuda = []
+default = ["parallel"]
+parallel = ["jolt-crypto/parallel", "jolt-poly/parallel"]
+profiling = ["jolt-akita/profiling"]
+
+[dev-dependencies]
+jolt-akita.workspace = true
+akita-config.workspace = true
+akita-params.workspace = true
+akita-pcs = { workspace = true, features = ["parallel", "transcript-blake2b"] }
+akita-types.workspace = true
+jolt-profiling = { path = "../jolt-profiling", default-features = false }
+criterion = { workspace = true }
+jolt-transcript = { workspace = true, features = [
+  "bn254",
+  "test-utils",
+  "transcript-blake2b",
+  "transcript-keccak",
+] }
+serde_json = { workspace = true }
+rand_core = { workspace = true }
+rand_chacha = { workspace = true }
+
+[[bench]]
+name = "dory"
+harness = false
+
+[[bench]]
+name = "akita_paths"
+harness = false

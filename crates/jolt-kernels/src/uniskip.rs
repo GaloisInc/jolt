@@ -1,0 +1,59 @@
+//! The uni-skip front slot: the pre-phase round of a uni-skip stage (stage 1
+//! Spartan outer, stage 2 product virtualization), generic over the remainder
+//! relation the front feeds.
+//!
+//! The uni-skip first round is a pre-phase, not a batch member: the stage
+//! front asks the slot to [`prepare`](UniskipKernel::prepare), sends the
+//! [`first_round_poly`](UniskipKernel::first_round_poly), and moves on. No
+//! instance object crosses the seam — the state the uni-skip round produces
+//! lives in the [`ProofSession`] under a key private to the implementing
+//! backend, and the same backend's `PrepareKernel<F, R>` remainder slot
+//! reclaims it once the uni-skip challenge is drawn.
+
+use jolt_verifier::stages::relations::OpeningIdOf;
+
+use jolt_claims::protocols::jolt::JoltChallengeId;
+use jolt_claims::{InputClaims, OutputClaims, SumcheckChallenges};
+use jolt_field::JoltField;
+use jolt_poly::UnivariatePoly;
+use jolt_verifier::stages::relations::{
+    ConcreteSumcheck, ConcreteSumcheckChallenges, SumcheckInputClaims, SumcheckOutputClaims,
+};
+use jolt_witness::JoltWitnessPlane;
+
+use crate::{KernelError, ProofSession};
+
+/// The uni-skip front slot of a stage. `R` is never named by the methods —
+/// it types the slot to the remainder relation the parked state becomes.
+/// `I` carries the upstream claims needed for interpolation: `()` for outer,
+/// and the selected stage-1 product claims for product virtualization (including
+/// the two field-register products under `field-inline`).
+pub trait UniskipKernel<F, R, I = ()>
+where
+    F: JoltField,
+    R: ConcreteSumcheck<F>,
+    SumcheckInputClaims<F, R>: InputClaims<F, OpeningIdOf<F, R>>,
+    SumcheckOutputClaims<F, R>: OutputClaims<F, OpeningIdOf<F, R>>,
+    ConcreteSumcheckChallenges<F, R>: SumcheckChallenges<F, JoltChallengeId>,
+{
+    /// Compute the uni-skip first-round state and park it in the session
+    /// under a backend-private key.
+    fn prepare(
+        &self,
+        session: &mut ProofSession,
+        log_t: usize,
+        tau: &[F],
+        witness: &dyn JoltWitnessPlane<F>,
+    ) -> Result<(), KernelError<F>>;
+
+    /// The uni-skip first-round polynomial. `late_tau` carries the challenges
+    /// drawn after [`prepare`](Self::prepare) (outer: empty; product:
+    /// `&[tau_high]`). `inputs` supplies upstream claims that a backend can
+    /// reuse as base-domain evaluations without recomputing them from the witness.
+    fn first_round_poly(
+        &self,
+        session: &mut ProofSession,
+        late_tau: &[F],
+        inputs: &I,
+    ) -> Result<UnivariatePoly<F>, KernelError<F>>;
+}

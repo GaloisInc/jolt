@@ -39,7 +39,7 @@ fn sum(input: &[u8]) -> u32 {
 ```
 
 ## Guest Attempts to Compile Standard Library
-Sometimes after installing the toolchain the guest still tries to compile with the standard library which will fail with a large number of errors that certain items such as `Result` are referenced and not available. This generally happens when one tries to run jolt before installing the toolchain. To address, try rerunning `jolt install-toolchain`, restarting your terminal, and delete both your rust target directory and any files under `/tmp` that begin with jolt.
+Sometimes after installing the toolchain the guest still tries to compile with the standard library which will fail with a large number of errors that certain items such as `Result` are referenced and not available. This generally happens when one tries to run jolt before installing the toolchain. To address, try rerunning `jolt install-toolchain`, restarting your terminal, and delete both your rust target directory and any files under your temp directory (`$TMPDIR`, or `/tmp` when unset) that begin with jolt.
 
 ## Guest Fails to Compile on the Host
 By default, Jolt will attempt to compile the guest for the host architecture. This is useful if you want to run and test the guest's tagged functions directly. If you know your guest code cannot compile on the host (for example, if your guest uses inline RISCV assembly), you can specify to only build for the guest architecture.
@@ -62,6 +62,40 @@ fn inline_asm() -> (i32, u32, i32, u32) {
 }
 ```
 
+
+## Null Pointer Write / "Unknown memory mapping: 0x0"
+If you see `Null pointer write detected (store to 0x0)` or `Illegal device store: Unknown memory mapping: 0x0`, it means your guest program crashed. This happens when musl's `abort()` cannot deliver a signal and falls back to writing to a null pointer.
+
+The most common cause is a missing jolt-sdk feature. If your guest uses:
+- **rayon or threading** — add `"thread"` to your jolt-sdk features
+- **randomness (getrandom)** — add `"random"` to your jolt-sdk features
+
+```toml
+[dependencies]
+jolt = { package = "jolt-sdk", features = ["guest-std", "thread", "random"] }
+```
+
+To diagnose which syscall is failing, add the `"debug"` feature to enable syscall logging:
+```toml
+jolt = { package = "jolt-sdk", features = ["guest-std", "debug"] }
+```
+This prints every syscall the guest makes (e.g. `[syscall] SYS_clone`), which helps identify which capability is missing.
+
+## Release Builds Miscompile Under Fat LTO
+The workspace release profile uses `lto = "fat"`. Fat LTO has miscompiled this
+workspace before ([rust-lang/rust#116941](https://github.com/rust-lang/rust/issues/116941)):
+a lookup-table test failed only in `--release` builds, with a field-element
+`assertion \`left == right\` failed` and no bug in the code under test.
+
+If a test fails only under `--release`, try one of these before debugging the code:
+
+- Build with thin LTO: `CARGO_PROFILE_RELEASE_LTO=thin cargo nextest run --release ...`
+- Keep fat LTO but disable LLVM's prepopulated passes:
+  `CARGO_PROFILE_RELEASE_LTO=fat RUSTFLAGS="-C no-prepopulate-passes" cargo nextest run --release ...`
+
+`-C no-prepopulate-passes` also changes guest code generation and can push an
+execution trace past a tight `max_trace_length`; raise that limit for the affected
+guest if it happens.
 
 ## Getting Help
 If none of the above solve the problem, please create a Github issue with a detailed bug report including the Jolt commit hash, the hardware or container configuration used, and a minimal guest program to reproduce the bug.

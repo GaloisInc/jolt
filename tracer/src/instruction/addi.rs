@@ -1,3 +1,4 @@
+use crate::instruction::registers::i::RegisterStateI;
 use serde::{Deserialize, Serialize};
 
 use crate::{declare_riscv_instr, emulator::cpu::Cpu};
@@ -12,14 +13,17 @@ declare_riscv_instr!(
     mask   = 0x0000707f,
     match  = 0x00000013,
     format = FormatI,
+    registers = RegisterStateI,
     ram    = ()
 );
 
 impl ADDI {
-    fn exec(&self, cpu: &mut Cpu, _: &mut <ADDI as RISCVInstruction>::RAMAccess) {
-        cpu.x[self.operands.rd as usize] = cpu.sign_extend(
-            cpu.x[self.operands.rs1 as usize]
-                .wrapping_add(normalize_imm(self.operands.imm, &cpu.xlen)),
+    fn exec(&self, cpu: &mut Cpu, _: &mut <ADDI as RISCVInstruction>::RamAccess) {
+        cpu.write_register(
+            self.operands.rd as usize,
+            cpu.sign_extend(
+                cpu.x[self.operands.rs1 as usize].wrapping_add(normalize_imm(self.operands.imm)),
+            ),
         );
     }
 }

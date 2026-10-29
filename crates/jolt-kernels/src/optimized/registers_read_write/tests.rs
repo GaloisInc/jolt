@@ -1,0 +1,172 @@
+use jolt_claims::protocols::jolt::geometry::dimensions::{
+    ReadWriteDimensions, REGISTER_ADDRESS_BITS,
+};
+use jolt_claims::protocols::jolt::{JoltPolynomialId, JoltVirtualPolynomial};
+use jolt_field::{Fr, Ring};
+use jolt_poly::Polynomial;
+use jolt_verifier::stages::stage4::registers_read_write_checking::{
+    RegistersReadWriteChallenges, RegistersReadWriteChecking, RegistersReadWriteInputClaims,
+};
+use jolt_witness::JoltWitnessOracle;
+
+use super::test_support::{
+    assert_kernel_parity, assert_nontrivial, challenge_sequence, structured_fixture, TraceFixture,
+};
+use super::OptimizedRegistersReadWrite;
+use crate::optimized::parity::ExceptionalEq;
+
+fn run_parity(fixture: TraceFixture, log_t: usize, seed: u64) {
+    run_parity_with_phases(
+        fixture,
+        log_t,
+        seed,
+        &[(log_t, 0), (0, REGISTER_ADDRESS_BITS)],
+    );
+}
+
+fn run_parity_with_phases(
+    fixture: TraceFixture,
+    log_t: usize,
+    seed: u64,
+    phase_splits: &[(usize, usize)],
+) {
+    run_parity_case(fixture, log_t, seed, phase_splits, None);
+}
+
+fn run_parity_case(
+    fixture: TraceFixture,
+    log_t: usize,
+    seed: u64,
+    phase_splits: &[(usize, usize)],
+    exceptional: Option<ExceptionalEq>,
+) {
+    fixture.with_plane(log_t, |backend| {
+        let round_challenges = challenge_sequence(log_t + REGISTER_ADDRESS_BITS, seed);
+        let first_cycle = if phase_splits[0].0 == 0 {
+            phase_splits[0].1
+        } else {
+            0
+        };
+        let r_cycle = exceptional.map_or_else(
+            || challenge_sequence(log_t, seed ^ 0xA5A5),
+            |case| case.point(log_t, round_challenges[first_cycle]),
+        );
+        let evaluate = |polynomial: JoltVirtualPolynomial| {
+            let table = JoltWitnessOracle::<Fr>::oracle_table(
+                backend,
+                JoltPolynomialId::Virtual(polynomial),
+            )
+            .unwrap();
+            Polynomial::new(table).evaluate(&r_cycle)
+        };
+        let gamma = Fr::from_u64(0x5EED_1234_5678_9ABC);
+        let claims = RegistersReadWriteInputClaims {
+            rd_write_value: evaluate(JoltVirtualPolynomial::RdWriteValue),
+            rs1_value: evaluate(JoltVirtualPolynomial::Rs1Value),
+            rs2_value: evaluate(JoltVirtualPolynomial::Rs2Value),
+        };
+        let points = RegistersReadWriteInputClaims {
+            rd_write_value: r_cycle.clone(),
+            rs1_value: r_cycle.clone(),
+            rs2_value: r_cycle,
+        };
+        let challenges = RegistersReadWriteChallenges { gamma };
+        let input_claim =
+            claims.rd_write_value + gamma * claims.rs1_value + gamma * gamma * claims.rs2_value;
+        if exceptional.is_none() {
+            assert_nontrivial(input_claim);
+        }
+        for &(phase1, phase2) in phase_splits {
+            let relation = RegistersReadWriteChecking::<Fr>::new(ReadWriteDimensions::new(
+                log_t,
+                REGISTER_ADDRESS_BITS,
+                phase1,
+                phase2,
+            ));
+            assert_kernel_parity(
+                &OptimizedRegistersReadWrite,
+                backend,
+                &relation,
+                &claims,
+                &points,
+                &challenges,
+                input_claim,
+                &round_challenges,
+            );
+        }
+    });
+}
+
+#[test]
+fn parity_structured_odd_log_t() {
+    run_parity(structured_fixture(8), 3, 17);
+}
+
+#[test]
+fn parity_structured_even_log_t() {
+    let log_t = 4;
+    run_parity_with_phases(
+        structured_fixture(16),
+        log_t,
+        23,
+        &[(log_t, 0), (0, REGISTER_ADDRESS_BITS), (log_t / 2, 0)],
+    );
+}
+
+#[test]
+fn parity_past_lut_saturation() {
+    // log_t = 6 runs three LUT-mode binds, the deref at the fourth, and
+    // two more cycle binds on direct field coefficients.
+    run_parity(structured_fixture(60), 6, 29);
+}
+
+#[test]
+fn parity_address_first_across_chunk_boundaries_and_padding() {
+    run_parity_with_phases(
+        structured_fixture((1 << 13) + 17),
+        14,
+        37,
+        &[(0, REGISTER_ADDRESS_BITS)],
+    );
+}
+
+#[test]
+fn parity_minimal_padded_trace() {
+    let mut fixture = TraceFixture::new();
+    fixture.op(Some(3), Some(1), Some(2));
+    fixture.op(Some(3), Some(3), None);
+    fixture.op(None, Some(3), Some(3));
+    run_parity(fixture, 2, 31);
+}
+
+#[test]
+fn parity_single_cycle_round() {
+    let mut fixture = TraceFixture::new();
+    fixture.op(Some(9), Some(9), Some(9));
+    fixture.op(Some(9), None, Some(9));
+    run_parity(fixture, 1, 41);
+}
+
+#[test]
+fn parity_exceptional_eq_across_sparse_layouts_and_orders() {
+    for log_t in [3usize, 4, 14] {
+        for phase in [(log_t, 0), (0, REGISTER_ADDRESS_BITS)] {
+            for case in ExceptionalEq::ALL {
+                run_parity_case(
+                    structured_fixture(1 << log_t),
+                    log_t,
+                    79,
+                    &[phase],
+                    Some(case),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn constant_suffix_boundaries_match_reference_in_both_orders() {
+    for prefix in [1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32] {
+        run_parity(structured_fixture(prefix), 5, 601 + prefix as u64);
+    }
+}

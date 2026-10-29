@@ -1,0 +1,81 @@
+use jolt_claims::protocols::jolt::JoltPolynomialId;
+use jolt_riscv::JoltTraceRow as TraceRow;
+
+use crate::witnesses::WitnessEnv;
+use crate::WitnessError;
+
+pub use jolt_witness_derive::WitnessBundle;
+
+/// A struct of atomic witnesses — exactly the values one consumer needs per
+/// cycle. Derive with `#[derive(WitnessBundle)]`: fields extract through
+/// their single-sourced `Extract` impls, and `#[opening(..)]` annotations tie
+/// fields to jolt-claims ids (unannotated fields are consumer facts with no
+/// protocol id).
+pub trait WitnessBundle: Sized {
+    /// The trace-backend constructor, composing the field extractors over
+    /// one cycle window.
+    fn from_row(
+        row: &TraceRow,
+        next: Option<&TraceRow>,
+        env: &WitnessEnv<'_>,
+    ) -> Result<Self, WitnessError>;
+
+    /// The jolt-claims ids of the annotated fields, in declaration order —
+    /// the stage-0 validation input (checked against the backend's servable
+    /// set before witness generation).
+    fn annotated_ids() -> Vec<JoltPolynomialId>;
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test module")]
+mod tests {
+    use jolt_claims::protocols::jolt::{JoltPolynomialId, JoltVirtualPolynomial};
+    use jolt_field::{Fr, Ring};
+    use jolt_riscv::CircuitFlags;
+
+    use super::WitnessBundle;
+    use crate::testing::with_sample_backend;
+    use crate::witnesses::{LookupIndex, LookupOutput, OpFlag, Product, ToField, UnexpandedPc};
+    use crate::BundleSource;
+
+    /// Exercises every `#[opening(..)]` form: fact fields (no annotation),
+    /// a bare virtual variant, and the payload-carrying indexed-family form.
+    #[derive(Clone, Copy, Debug, WitnessBundle)]
+    struct DeriveCoverageBundle {
+        lookup_index: LookupIndex,
+        product: Product,
+        #[opening(LookupOutput)]
+        lookup_output: LookupOutput,
+        #[opening(UnexpandedPC)]
+        unexpanded_pc: UnexpandedPc,
+        #[opening(OpFlags(CircuitFlags::AddOperands))]
+        add_operands: OpFlag,
+    }
+
+    #[test]
+    fn annotated_ids_follow_declaration_order() {
+        assert_eq!(
+            DeriveCoverageBundle::annotated_ids(),
+            vec![
+                JoltPolynomialId::Virtual(JoltVirtualPolynomial::LookupOutput),
+                JoltPolynomialId::Virtual(JoltVirtualPolynomial::UnexpandedPC),
+                JoltPolynomialId::Virtual(JoltVirtualPolynomial::OpFlags(
+                    CircuitFlags::AddOperands
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn from_row_composes_the_field_extractors() {
+        with_sample_backend(|backend| {
+            let rows: Vec<DeriveCoverageBundle> = backend.bundles().unwrap();
+            assert_eq!(rows.len(), 4);
+            assert_eq!(rows[0].lookup_output, LookupOutput(8));
+            assert_eq!(rows[0].unexpanded_pc.0, 0x8000_0000);
+            assert_eq!(rows[0].add_operands, OpFlag(true));
+            assert_eq!(rows[0].product.to_field::<Fr>(), Fr::from_u64(15));
+            assert_eq!(rows[1].lookup_index, LookupIndex(0));
+        });
+    }
+}

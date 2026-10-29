@@ -13,15 +13,10 @@ use log::{debug, info};
 use rand::prelude::SliceRandom;
 use sysinfo::System;
 
-use build_wasm::{build_wasm, modify_cargo_toml};
+use build_wasm::build_wasm;
 use zeroos_build::cmds::{build::BacktraceMode, BuildArgs, StdMode};
 use zeroos_build::spec::TargetRenderOptions;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-/// Linker script template embedded at compile time.
-/// This linker script is for Jolt zkVM guests.
 static LINKER_TEMPLATE: &str = include_str!("linker.ld.template");
 
 #[derive(Parser)]
@@ -40,6 +35,9 @@ enum JoltCommand {
         /// Whether to generate WASM compatible files
         #[arg(short, long)]
         wasm: bool,
+        /// Generate project with zero-knowledge (PrivateInput + BlindFold) support
+        #[arg(long)]
+        zk: bool,
     },
 
     /// Build a guest program for Jolt zkVM
@@ -125,8 +123,8 @@ fn main() {
 
     let cli = Cli::parse();
     let result = match cli.command {
-        JoltCommand::New { name, wasm } => {
-            create_project(name, wasm);
+        JoltCommand::New { name, wasm, zk } => {
+            create_project(name, wasm, zk);
             Ok(())
         }
         JoltCommand::Build(args) => build_command(args),
@@ -147,11 +145,6 @@ fn main() {
     }
 }
 
-// ============================================================================
-// Build command (from cargo-jolt)
-// ============================================================================
-
-/// Resolve the guest optimization level from `JOLT_GUEST_OPT` env var (default: "3").
 fn guest_opt_flag() -> String {
     let level = std::env::var("JOLT_GUEST_OPT").unwrap_or_else(|_| "3".to_string());
     match level.as_str() {
@@ -167,7 +160,6 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
     let workspace_root = zeroos_build::cmds::find_workspace_root()?;
     debug!("workspace_root: {}", workspace_root.display());
 
-    // Use the embedded linker template (compiled into the binary)
     let linker_tpl = LINKER_TEMPLATE.to_string();
 
     let fully = args.base.mode == StdMode::Std || args.base.fully;
@@ -197,14 +189,20 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
     let backtrace_via_env = std::env::var("JOLT_BACKTRACE")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);
+
+    let force_frame_pointers = matches!(
+        args.base.backtrace,
+        BacktraceMode::Dwarf | BacktraceMode::FramePointers
+    );
+
     let preserve_symbols = backtrace_via_env
+        || force_frame_pointers
         || match args.base.backtrace {
-            BacktraceMode::Enable => true,
-            BacktraceMode::Disable => false,
             BacktraceMode::Auto => {
                 let profile = zeroos_build::project::detect_profile(&args.base.cargo_args);
                 matches!(profile.as_str(), "debug" | "dev")
             }
+            _ => false,
         };
 
     let mut jolt_rustflags: Vec<&str> = vec![
@@ -215,6 +213,20 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
         "-Cllvm-args=-enable-machine-outliner=never",
         "--cfg=getrandom_backend=\"custom\"",
     ];
+
+    if args.base.mode == StdMode::Std {
+        // Rust 1.95 gates generated target specs behind this flag; zeroos-build sets RUSTC_BOOTSTRAP.
+        jolt_rustflags.push("-Zunstable-options");
+    }
+
+    if args
+        .base
+        .target
+        .as_deref()
+        .is_none_or(|target| target.starts_with("riscv64"))
+    {
+        jolt_rustflags.extend(["-Clink-arg=--wrap=memcpy", "-Clink-arg=--wrap=memmove"]);
+    }
 
     // Also set medany for C code (cc crate reads CFLAGS_{target}).
     let cflags_target = match args.base.mode {
@@ -231,8 +243,36 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
         std::env::set_var(&cflags_key, &cflags);
     }
 
+    // Builder paths (CARGO_HOME, checkout location, sysroot) otherwise end up in panic
+    // locations and debuginfo, making the ELF and its proof digest machine-dependent.
+    // Cargo accepts -Ztrim-paths because zeroos-build sets RUSTC_BOOTSTRAP for this build.
+    std::env::set_var("CARGO_UNSTABLE_TRIM_PATHS", "true");
+    std::env::set_var("CARGO_PROFILE_DEV_TRIM_PATHS", "all");
+    std::env::set_var("CARGO_PROFILE_RELEASE_TRIM_PATHS", "all");
+
     if !preserve_symbols {
         jolt_rustflags.push("-Cstrip=symbols");
+    }
+
+    // Frame pointers change generated code — only enable for explicit --backtrace modes,
+    // never for JOLT_BACKTRACE (which only needs symbol metadata).
+    if force_frame_pointers {
+        jolt_rustflags.push("-Cforce-frame-pointers=yes");
+    }
+
+    // zeroos-build writes the linker script under `cargo metadata`'s target directory,
+    // which ignores a passthrough `--target-dir`. Without this, concurrent builds of one
+    // guest into separate target dirs rewrite a shared script while another build links.
+    let cargo_args = &args.base.cargo_args;
+    let target_dir = cargo_args.iter().enumerate().find_map(|(i, arg)| {
+        if arg == "--target-dir" {
+            cargo_args.get(i + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix("--target-dir=")
+        }
+    });
+    if let Some(target_dir) = target_dir {
+        std::env::set_var("CARGO_TARGET_DIR", target_dir);
     }
 
     zeroos_build::cmds::build_binary_with_rustflags(
@@ -246,12 +286,7 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
     Ok(())
 }
 
-// ============================================================================
-// Run command (from cargo-jolt)
-// ============================================================================
-
 fn find_jolt_emu() -> Option<PathBuf> {
-    // First check if jolt-emu is in PATH
     if let Ok(output) = Command::new("which").arg("jolt-emu").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -261,12 +296,9 @@ fn find_jolt_emu() -> Option<PathBuf> {
         }
     }
 
-    // Check common locations relative to the jolt repository
     let common_paths = [
-        // Relative to current working directory (if in jolt repo)
         "target/release/jolt-emu",
         "target/debug/jolt-emu",
-        // Common sibling directory layout
         "../jolt/target/release/jolt-emu",
         "../jolt/target/debug/jolt-emu",
     ];
@@ -318,10 +350,6 @@ fn run_command(args: RunArgs) -> Result<()> {
 
     Ok(())
 }
-
-// ============================================================================
-// Generate commands (from cargo-jolt)
-// ============================================================================
 
 fn generate_target_command(cli_args: JoltGenerateTargetArgs) -> Result<()> {
     use zeroos_build::cmds::generate_target_spec;
@@ -383,17 +411,10 @@ fn generate_linker_command(cli_args: JoltGenerateLinkerArgs) -> Result<()> {
     Ok(())
 }
 
-// ============================================================================
-// Project scaffolding (original jolt new)
-// ============================================================================
-
-fn create_project(name: String, wasm: bool) {
+fn create_project(name: String, _wasm: bool, zk: bool) {
     create_folder_structure(&name).expect("could not create directory");
-    create_host_files(&name).expect("file creation failed");
-    create_guest_files(&name).expect("file creation failed");
-    if wasm {
-        modify_cargo_toml(&name).expect("Failed to update Cargo.toml");
-    }
+    create_host_files(&name, zk).expect("file creation failed");
+    create_guest_files(&name, zk).expect("file creation failed");
     display_welcome();
 }
 
@@ -406,29 +427,37 @@ fn create_folder_structure(name: &str) -> eyre::Result<()> {
     Ok(())
 }
 
-fn create_host_files(name: &str) -> eyre::Result<()> {
+fn create_host_files(name: &str, zk: bool) -> eyre::Result<()> {
     let mut toolchain_file = File::create(format!("{name}/rust-toolchain.toml"))?;
     toolchain_file.write_all(RUST_TOOLCHAIN.as_bytes())?;
 
     let mut gitignore_file = File::create(format!("{name}/.gitignore"))?;
     gitignore_file.write_all(GITIGNORE.as_bytes())?;
 
-    let cargo_file_contents = HOST_CARGO_TEMPLATE.replace("{NAME}", name);
+    let template = if zk {
+        HOST_CARGO_TEMPLATE_ZK
+    } else {
+        HOST_CARGO_TEMPLATE
+    };
+    let cargo_file_contents = template.replace("{NAME}", name);
     let mut cargo_file = File::create(format!("{name}/Cargo.toml"))?;
     cargo_file.write_all(cargo_file_contents.as_bytes())?;
 
+    let main = if zk { HOST_MAIN_ZK } else { HOST_MAIN };
     let mut main_file = File::create(format!("{name}/src/main.rs"))?;
-    main_file.write_all(HOST_MAIN.as_bytes())?;
+    main_file.write_all(main.as_bytes())?;
 
     Ok(())
 }
 
-fn create_guest_files(name: &str) -> eyre::Result<()> {
+fn create_guest_files(name: &str, zk: bool) -> eyre::Result<()> {
+    let cargo = if zk { GUEST_CARGO_ZK } else { GUEST_CARGO };
     let mut cargo_file = File::create(format!("{name}/guest/Cargo.toml"))?;
-    cargo_file.write_all(GUEST_CARGO.as_bytes())?;
+    cargo_file.write_all(cargo.as_bytes())?;
 
+    let lib = if zk { GUEST_LIB_ZK } else { GUEST_LIB };
     let mut lib_file = File::create(format!("{name}/guest/src/lib.rs"))?;
-    lib_file.write_all(GUEST_LIB.as_bytes())?;
+    lib_file.write_all(lib.as_bytes())?;
 
     let mut main_file = File::create(format!("{name}/guest/src/main.rs"))?;
     main_file.write_all(GUEST_MAIN.as_bytes())?;
@@ -437,6 +466,9 @@ fn create_guest_files(name: &str) -> eyre::Result<()> {
 }
 
 fn display_welcome() {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return;
+    }
     display_greeting();
     println!("{}", "-".repeat(80));
     display_sysinfo();
@@ -474,9 +506,9 @@ fn display_greeting() {
 }
 
 fn display_sysinfo() {
-    let mut sys = System::new_all();
-
-    sys.refresh_all();
+    let mut sys = System::new();
+    sys.refresh_memory();
+    sys.refresh_cpu_all();
 
     println!(
         "OS:             {}",
@@ -507,6 +539,9 @@ edition = "2021"
 [workspace]
 members = ["guest"]
 
+[features]
+field-inline = ["jolt-sdk/field-inline", "guest/field-inline"]
+
 [profile.release]
 debug = 1
 codegen-units = 1
@@ -532,24 +567,79 @@ const HOST_MAIN: &str = r#"use tracing::info;
 pub fn main() {
     tracing_subscriber::fmt::init();
 
-    let target_dir = "/tmp/jolt-guest-targets";
-    let mut program = guest::compile_fib(target_dir);
+    let target_dir = std::env::temp_dir().join("jolt-guest-targets");
+    let mut program = guest::compile_fib(&target_dir.to_string_lossy());
 
-    let shared_preprocessing = guest::preprocess_shared_fib(&mut program);
+    let shared_preprocessing = guest::preprocess_shared_fib(&mut program).unwrap();
 
-    let prover_preprocessing = guest::preprocess_prover_fib(shared_preprocessing.clone());
-    let verifier_setup = prover_preprocessing.generators.to_verifier_setup();
+    let prover_preprocessing = guest::preprocess_prover_fib(shared_preprocessing);
     let verifier_preprocessing =
-        guest::preprocess_verifier_fib(shared_preprocessing, verifier_setup);
+        guest::verifier_preprocessing_from_prover_fib(&prover_preprocessing);
 
     let prove_fib = guest::build_prover_fib(program, prover_preprocessing);
     let verify_fib = guest::build_verifier_fib(verifier_preprocessing);
 
     let (output, proof, io_device) = prove_fib(50);
-    let is_valid = verify_fib(50, output, io_device.panic, proof);
+    verify_fib(50, output, io_device.panic, proof).expect("proof verification failed");
 
     info!("output: {output}");
-    info!("valid: {is_valid}");
+}
+"#;
+
+const HOST_CARGO_TEMPLATE_ZK: &str = r#"[package]
+name = "{NAME}"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["guest"]
+
+[features]
+field-inline = ["jolt-sdk/field-inline", "guest/field-inline"]
+
+[profile.release]
+debug = 1
+codegen-units = 1
+lto = "fat"
+
+[dependencies]
+jolt-sdk = { git = "https://github.com/a16z/jolt", features = ["host", "zk"] }
+guest = { path = "./guest" }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[patch.crates-io]
+ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-ec = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+jolt-optimizations = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+allocative = { git = "https://github.com/facebookexperimental/allocative", rev = "85b773d85d526d068ce94724ff7a7b81203fc95e" }
+"#;
+
+const HOST_MAIN_ZK: &str = r#"use jolt_sdk::PrivateInput;
+use tracing::info;
+
+pub fn main() {
+    tracing_subscriber::fmt::init();
+
+    let target_dir = std::env::temp_dir().join("jolt-guest-targets");
+    let mut program = guest::compile_fib(&target_dir.to_string_lossy());
+
+    let shared_preprocessing = guest::preprocess_shared_fib(&mut program).unwrap();
+
+    let prover_preprocessing = guest::preprocess_prover_fib(shared_preprocessing);
+    let verifier_preprocessing =
+        guest::verifier_preprocessing_from_prover_fib(&prover_preprocessing);
+
+    let prove_fib = guest::build_prover_fib(program, prover_preprocessing);
+    let verify_fib = guest::build_verifier_fib(verifier_preprocessing);
+
+    // n is private — verifier doesn't receive it
+    let (output, proof, io_device) = prove_fib(PrivateInput::new(50));
+    verify_fib(output, io_device.panic, proof).expect("proof verification failed");
+
+    info!("output: {output}");
 }
 "#;
 
@@ -562,6 +652,20 @@ edition = "2021"
 
 [features]
 guest = []
+field-inline = ["jolt/field-inline"]
+
+[dependencies]
+jolt = { package = "jolt-sdk", git = "https://github.com/a16z/jolt" }
+"#;
+
+const GUEST_CARGO_ZK: &str = r#"[package]
+name = "guest"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+guest = []
+field-inline = ["jolt/field-inline"]
 
 [dependencies]
 jolt = { package = "jolt-sdk", git = "https://github.com/a16z/jolt" }
@@ -575,6 +679,24 @@ fn fib(n: u32) -> u128 {
     let mut b: u128 = 1;
     let mut sum: u128;
     for _ in 1..n {
+        sum = a + b;
+        a = b;
+        b = sum;
+    }
+
+    b
+}
+"#;
+
+const GUEST_LIB_ZK: &str = r#"#![cfg_attr(feature = "guest", no_std)]
+use jolt::PrivateInput;
+
+#[jolt::provable(heap_size = 32768, max_trace_length = 65536)]
+fn fib(n: PrivateInput<u32>) -> u128 {
+    let mut a: u128 = 0;
+    let mut b: u128 = 1;
+    let mut sum: u128;
+    for _ in 1..*n {
         sum = a + b;
         a = b;
         b = sum;

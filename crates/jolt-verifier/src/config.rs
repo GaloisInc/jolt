@@ -1,0 +1,170 @@
+//! Verifier-selected protocol configuration.
+//!
+//! Every protocol axis is fixed at compile time — the `zk` feature selects
+//! BlindFold, the `akita` feature selects Akita commitments, the
+//! `field-inline` feature enables the native
+//! field-register extension — so one compiled verifier runs exactly one
+//! protocol. A proof self-describes its axes and [`validate_proof_config`]
+//! rejects a mismatch fail-closed.
+
+pub use jolt_claims::protocols::field_inline::FieldInlineConfig;
+use jolt_riscv::JoltInstructionProfile;
+#[cfg(not(feature = "field-inline"))]
+use jolt_riscv::RV64IMAC_JOLT;
+#[cfg(feature = "field-inline")]
+use jolt_riscv::RV64IMAC_JOLT_FIELD_INLINE;
+use serde::{Deserialize, Serialize};
+
+use crate::VerifierError;
+
+#[cfg(all(feature = "zk", feature = "akita"))]
+compile_error!(
+    "the `zk` and `akita` features are mutually exclusive: no zk protocol exists over the \
+     Akita commitment axis (a lattice-friendly hiding commitment is a future workstream)"
+);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ZkConfig {
+    Transparent,
+    BlindFold,
+}
+
+/// The commitment axis of the protocol: how committed polynomials are
+/// discharged at the final opening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommitmentConfig {
+    /// Per-polynomial commitments, RLC batch opening (requires additive
+    /// homomorphism).
+    Homomorphic,
+    /// Native one-hot trace groups and dense auxiliary commitments with
+    /// heterogeneous Akita opening and verification.
+    Akita,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoltProtocolConfig {
+    pub zk: ZkConfig,
+    pub commitment: CommitmentConfig,
+    pub field_inline: FieldInlineConfig,
+}
+
+impl JoltProtocolConfig {
+    pub const fn for_zk(zk: bool) -> Self {
+        Self {
+            zk: if zk {
+                ZkConfig::BlindFold
+            } else {
+                ZkConfig::Transparent
+            },
+            commitment: SELECTED_COMMITMENT_CONFIG,
+            field_inline: SELECTED_FIELD_INLINE_CONFIG,
+        }
+    }
+}
+
+/// The instruction profile this build has constraints for. Input validation
+/// rejects a program whose bytecode carries any other Jolt instruction kind:
+/// the base rows pin an rd write only through the lookup/load/jump flags, so a
+/// row from an extension the verifier was not built with would verify with
+/// its write unconstrained.
+#[cfg(feature = "field-inline")]
+pub const JOLT_VERIFIER_INSTRUCTION_PROFILE: JoltInstructionProfile = RV64IMAC_JOLT_FIELD_INLINE;
+#[cfg(not(feature = "field-inline"))]
+pub const JOLT_VERIFIER_INSTRUCTION_PROFILE: JoltInstructionProfile = RV64IMAC_JOLT;
+
+#[cfg(feature = "zk")]
+pub const SELECTED_ZK_CONFIG: ZkConfig = ZkConfig::BlindFold;
+
+#[cfg(not(feature = "zk"))]
+pub const SELECTED_ZK_CONFIG: ZkConfig = ZkConfig::Transparent;
+
+#[cfg(feature = "akita")]
+pub const SELECTED_COMMITMENT_CONFIG: CommitmentConfig = CommitmentConfig::Akita;
+
+#[cfg(not(feature = "akita"))]
+pub const SELECTED_COMMITMENT_CONFIG: CommitmentConfig = CommitmentConfig::Homomorphic;
+
+#[cfg(feature = "field-inline")]
+pub const SELECTED_FIELD_INLINE_CONFIG: FieldInlineConfig = FieldInlineConfig::enabled();
+
+#[cfg(not(feature = "field-inline"))]
+pub const SELECTED_FIELD_INLINE_CONFIG: FieldInlineConfig = FieldInlineConfig::disabled();
+
+/// The minimum padded trace length — the compiled protocol's PCS floor
+/// (legacy's `PCS::MIN_PADDED_TRACE_LENGTH`). Dory needs `T >= K^(1/D)`
+/// (256); Akita's folded-only protocol cannot schedule the K=16
+/// `OneHotTrace` group below 16 variables, and column arity is
+/// `log_k_chunk + log_T`, so the Akita pipeline pads every trace to at
+/// least 2^12 cycles. The prover pads to this floor and the verifier rejects
+/// shorter traces.
+#[cfg(not(feature = "akita"))]
+pub const MIN_PADDED_TRACE_LENGTH: usize = 256;
+#[cfg(feature = "akita")]
+pub const MIN_PADDED_TRACE_LENGTH: usize = 1 << 12;
+
+/// The one protocol this build verifies.
+pub const JOLT_VERIFIER_CONFIG: JoltProtocolConfig = JoltProtocolConfig {
+    zk: SELECTED_ZK_CONFIG,
+    commitment: SELECTED_COMMITMENT_CONFIG,
+    field_inline: SELECTED_FIELD_INLINE_CONFIG,
+};
+
+pub fn validate_proof_config(
+    config: &JoltProtocolConfig,
+    protocol: JoltProtocolConfig,
+) -> Result<(), VerifierError> {
+    if protocol != *config {
+        return Err(VerifierError::ProtocolConfigMismatch {
+            expected: *config,
+            got: protocol,
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "wire-format test assertions")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_wire_format_is_explicit() {
+        let protocol = JoltProtocolConfig {
+            zk: ZkConfig::Transparent,
+            commitment: CommitmentConfig::Homomorphic,
+            field_inline: FieldInlineConfig::disabled(),
+        };
+        assert_eq!(postcard::to_stdvec(&protocol).unwrap(), [0, 0, 0, 4, 0]);
+        assert_eq!(
+            postcard::from_bytes::<JoltProtocolConfig>(&[0, 0, 0, 4, 0]).unwrap(),
+            protocol
+        );
+        assert!(postcard::from_bytes::<JoltProtocolConfig>(&[0, 0, 0]).is_err());
+        let akita_protocol = JoltProtocolConfig {
+            commitment: CommitmentConfig::Akita,
+            ..protocol
+        };
+        assert_eq!(
+            postcard::to_stdvec(&akita_protocol).unwrap(),
+            [0, 1, 0, 4, 0]
+        );
+        assert_eq!(
+            postcard::from_bytes::<JoltProtocolConfig>(&[0, 1, 0, 4, 0]).unwrap(),
+            akita_protocol
+        );
+    }
+
+    /// A proof declaring a different field-register file size rejects even when the enabled
+    /// bit matches: the whole config participates in the equality gate.
+    #[test]
+    fn mismatched_field_register_log_k_is_rejected() {
+        let mut protocol = JOLT_VERIFIER_CONFIG;
+        protocol.field_inline.field_register_log_k += 1;
+
+        assert!(matches!(
+            validate_proof_config(&JOLT_VERIFIER_CONFIG, protocol),
+            Err(VerifierError::ProtocolConfigMismatch { .. })
+        ));
+    }
+}

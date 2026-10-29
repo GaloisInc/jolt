@@ -16,7 +16,7 @@ These constraints capture:
 
 Jolt leverages Twist and Shout instances, each comprising sumchecks.
 Jolt's R1CS constraints provide essential "links" between these sumchecks, enforcing relationships between different polynomials.
-For example, R1CS ensures consistency between independent components such as the RAM and register Twist instances: for instructions like `LB` or `LW`, an R1CS constraint ensures the value read from RAM matches the value written into the destination register (`rd`).
+For example, R1CS ensures consistency between independent components such as the RAM and register Twist instances: for load instructions such as `LD`, an R1CS constraint ensures the value read from RAM matches the value written into the destination register (`rd`).
 This is critical because RAM and registers operate as independent Twist memory checking instances, and we need to enforce this relationship between otherwise disjoint witnesses.
 
 ## Arithmetic instructions
@@ -24,7 +24,7 @@ This is critical because RAM and registers operate as independent Twist memory c
 While Jolt's design uniquely leverages lookups for most RISC-V instructions, arithmetic instructions are the exception to this rule.
 Most arithmetic instructions (addition, subtraction, multiplication) are primarily constrained using R1CS constraints, with the lookup only serving to truncate potential overflow bits.
 
-For these instructions, we can emulate the 64-bit arithmetic using native field arithmetic, since Jolt's elliptic curve scalar field is big enough to perform these operations without overflow.
+For these instructions, we can emulate the 64-bit arithmetic using native field arithmetic, since Jolt's proof field is big enough to perform these operations without overflow. The field is the BN254 scalar field with [Dory](../dory.md), or a 128-bit prime field with [Akita](../akita.md).
 E.g. to add two 64-bit numbers `x` and `y`, we can add their $\mathbb{F}_r$ equivalents $x$ and $y$, knowing that $x + y \in \mathbb{F}_r$ will be equivalent to the desired 65-bit sum.
 We then employ a range-check lookup to truncate the potential overflow bit, thus matching the behavior of the RISC-V spec.
 
@@ -37,7 +37,7 @@ Some examples of circuit flags:
 
 - Jump Flag: Indicates jump instructions (JAL, JALR).
 
-- Load Flag: Indicates load instructions (e.g. LB, LW).
+- Load Flag: Indicates load instructions (`LD`, and the `VirtualLoad*` doubleword loads that sub-word loads expand into).
 
 - AddOperands Flag: Indicates that the instruction operands should be added "in the field", as described [above](#arithmetic-instructions) (e.g. ADD, ADDI, AUIPC).
 

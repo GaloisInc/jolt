@@ -7,12 +7,10 @@ pub fn main() {
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_rand(target_dir);
 
-    let shared_preprocessing = guest::preprocess_shared_rand(&mut program);
+    let shared_preprocessing = guest::preprocess_shared_rand(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_rand(shared_preprocessing.clone());
-    let verifier_preprocessing = guest::preprocess_verifier_rand(
-        shared_preprocessing,
-        prover_preprocessing.generators.to_verifier_setup(),
-    );
+    let verifier_preprocessing =
+        guest::verifier_preprocessing_from_prover_rand(&prover_preprocessing);
 
     let prove = guest::build_prover_rand(program, prover_preprocessing);
     let verify = guest::build_verifier_rand(verifier_preprocessing);
@@ -32,8 +30,7 @@ pub fn main() {
     let now = Instant::now();
     let (output, proof, program_io) = prove(a, b);
     info!("Prover runtime: {} s", now.elapsed().as_secs_f64());
-    let is_valid = verify(a, b, output, program_io.panic, proof);
+    verify(a, b, output, program_io.panic, proof).expect("proof verification failed");
 
     info!("output: {output}");
-    info!("valid: {is_valid}");
 }

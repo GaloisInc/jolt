@@ -5,23 +5,18 @@
 //! During actual runtime execution, these values will vary according to the specific bytecode being executed
 //! and should be replaced with actual runtime values.
 
-use crate::emulator::cpu::Xlen;
 use crate::instruction::format::format_inline::FormatInline;
 use crate::instruction::Instruction;
-use crate::utils::inline_helpers::InstrAssembler;
-use crate::utils::virtual_registers::VirtualRegisterAllocator;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
 pub const DEFAULT_RAM_START_ADDRESS: u64 = 0x80000000;
-pub const DEFAULT_XLEN: Xlen = Xlen::Bit64;
 pub const DEFAULT_RS1: u8 = 10;
 pub const DEFAULT_RS2: u8 = 11;
 pub const DEFAULT_RS3: u8 = 12;
 pub const DEFAULT_IS_COMPRESSED: bool = false;
 
-/// Descriptor for an inline instruction containing its identifying information
 #[derive(Debug, Clone)]
 pub struct InlineDescriptor {
     /// Human-readable name of the inline instruction
@@ -42,15 +37,11 @@ impl InlineDescriptor {
     }
 }
 
-/// Input parameters for instruction sequence generation
 #[derive(Debug, Clone)]
 pub struct SequenceInputs {
     /// Memory address of the instruction
     pub address: u64,
-    /// Whether the instruction is compressed
     pub is_compressed: bool,
-    /// CPU architecture width (32 or 64)
-    pub xlen: Xlen,
     pub rs1: u8,
     pub rs2: u8,
     pub rs3: u8,
@@ -66,23 +57,11 @@ impl From<&SequenceInputs> for FormatInline {
     }
 }
 
-impl From<&SequenceInputs> for InstrAssembler {
-    fn from(input: &SequenceInputs) -> Self {
-        InstrAssembler::new_inline(
-            input.address,
-            input.is_compressed,
-            input.xlen,
-            &VirtualRegisterAllocator::default(),
-        )
-    }
-}
-
 impl SequenceInputs {
-    pub fn new(address: u64, is_compressed: bool, xlen: Xlen, rs1: u8, rs2: u8, rs3: u8) -> Self {
+    pub fn new(address: u64, is_compressed: bool, rs1: u8, rs2: u8, rs3: u8) -> Self {
         Self {
             address,
             is_compressed,
-            xlen,
             rs1,
             rs2,
             rs3,
@@ -95,7 +74,6 @@ impl Default for SequenceInputs {
         Self {
             address: DEFAULT_RAM_START_ADDRESS,
             is_compressed: DEFAULT_IS_COMPRESSED,
-            xlen: DEFAULT_XLEN,
             rs1: DEFAULT_RS1,
             rs2: DEFAULT_RS2,
             rs3: DEFAULT_RS3,
@@ -150,10 +128,7 @@ pub fn write_inline_trace(
         inline_info.name, inline_info.opcode, inline_info.funct3, inline_info.funct7
     )?;
 
-    let xlen = match sequence_inputs.xlen {
-        Xlen::Bit32 => "32",
-        Xlen::Bit64 => "64",
-    };
+    let xlen = "64";
 
     writeln!(
         file,
@@ -180,13 +155,14 @@ fn format_instruction_with_placeholders(
     sequence_inputs: &SequenceInputs,
 ) -> String {
     let mut formatted = format!("{instruction:?}");
-    let normalized_instr = instruction.normalize();
+    let normalized_instr = instruction
+        .try_jolt_instruction_row()
+        .expect("inline sequence writer only formats final Jolt instructions");
 
     // Replace address with placeholder (address is always in hex format)
     let address_pattern = format!("address: {:#x}", normalized_instr.address);
     formatted = formatted.replace(&address_pattern, "address: $ADDR");
 
-    // Create a mapping of values to their placeholders
     let reg_value_to_placeholder = [
         (sequence_inputs.rs1, "$RS1"),
         (sequence_inputs.rs2, "$RS2"),

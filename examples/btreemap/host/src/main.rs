@@ -18,7 +18,7 @@ pub fn btreemap() {
     });
 
     let shared_preprocessing = step!("Preprocessing shared", {
-        guest::preprocess_shared_btreemap(&mut program)
+        guest::preprocess_shared_btreemap(&mut program).unwrap()
     });
 
     let prover_preprocessing = step!("Preprocessing prover", {
@@ -26,10 +26,7 @@ pub fn btreemap() {
     });
 
     let verifier_preprocessing = step!("Preprocessing verifier", {
-        guest::preprocess_verifier_btreemap(
-            shared_preprocessing,
-            prover_preprocessing.generators.to_verifier_setup(),
-        )
+        guest::verifier_preprocessing_from_prover_btreemap(&prover_preprocessing)
     });
 
     let prove = step!("Building prover", {
@@ -44,8 +41,8 @@ pub fn btreemap() {
     let (output, proof, io_device) = step!("Proving", { prove(n) });
     assert!(output >= 1);
 
-    let is_valid = step!("Verifying", { verify(n, output, io_device.panic, proof) });
-    assert!(is_valid);
+    step!("Verifying", { verify(n, output, io_device.panic, proof) })
+        .expect("proof verification failed");
 }
 
 fn main() {

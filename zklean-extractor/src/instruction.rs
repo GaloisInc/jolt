@@ -1,34 +1,32 @@
-use jolt_core::zkvm::{
-    instruction::{CircuitFlags, Flags as _, InstructionLookup as _, InterleavedBitsMarker as _},
-    r1cs::inputs::JoltR1CSInputs,
-};
+use common::constants::XLEN;
+use jolt_lookup_tables::InstructionLookupTable;
+use jolt_riscv::{Flags as _, InterleavedBitsMarker as _, JoltInstruction, CIRCUIT_FLAGS};
 use strum::IntoEnumIterator as _;
-use tracer::instruction::Instruction;
+use tracer::instruction::{Instruction, JoltInstructionRow};
 
 use crate::{
     constants::JoltParameterSet,
     lookups::ZkLeanLookupTable,
     mle_ast::DefaultMleAst,
     modules::{AsModule, Module},
-    r1cs::input_to_field_name,
+    r1cs::circuit_flag_field_name,
     util::{indent, ZkLeanReprField},
 };
 
-/// Represents how an instructions operands should be combined into a single vector.
 #[derive(Debug, Clone, Copy)]
 pub enum OperandInterleaving {
     /// Indicates that the operands should be concatenated:
     ///     rs1 || rs2
     Concatenated,
     /// Indicates that the operands should be interleaved:
-    ///     rs1[0] || rs2[0] || rs1[1] || rs2[1] || ...
+    ///     `rs1[0] || rs2[0] || rs1[1] || rs2[1] || ...`
     Interleaved,
 }
 
 impl OperandInterleaving {
-    /// Extract the operand interleaving for an instruction
-    fn instruction_interleaving(instr: &Instruction) -> Self {
-        if instr.circuit_flags().is_interleaved_operands() {
+    fn instruction_interleaving(instruction: &JoltInstructionRow) -> Self {
+        let instruction = JoltInstruction::from(*instruction);
+        if instruction.circuit_flags().is_interleaved_operands() {
             Self::Interleaved
         } else {
             Self::Concatenated
@@ -45,21 +43,24 @@ impl std::fmt::Display for OperandInterleaving {
     }
 }
 
-/// Wrapper around a JoltInstruction
-// TODO: Make this generic over the instruction set
 #[derive(Debug, Clone)]
 pub struct ZkLeanInstruction<J> {
     instruction: tracer::instruction::Instruction,
+    row: JoltInstructionRow,
     interleaving: OperandInterleaving,
     phantom: std::marker::PhantomData<J>,
 }
 
 impl<J> From<Instruction> for ZkLeanInstruction<J> {
     fn from(value: Instruction) -> Self {
-        let interleaving = OperandInterleaving::instruction_interleaving(&value);
+        let row = value
+            .try_jolt_instruction_row()
+            .expect("ZkLean extraction instruction must be a final Jolt row");
+        let interleaving = OperandInterleaving::instruction_interleaving(&row);
 
         Self {
             instruction: value,
+            row,
             interleaving,
             phantom: std::marker::PhantomData,
         }
@@ -75,24 +76,10 @@ impl<J: JoltParameterSet> ZkLeanInstruction<J> {
     }
 
     pub fn iter() -> impl Iterator<Item = Self> {
-        Instruction::iter().filter_map(|instr| {
-            // Needed to call `Instruction::inline_sequence`
-            let allocator = tracer::utils::virtual_registers::VirtualRegisterAllocator::new();
-            let xlen = match J::XLEN {
-                32 => tracer::emulator::cpu::Xlen::Bit32,
-                64 => tracer::emulator::cpu::Xlen::Bit64,
-                _ => panic!("Unsupported bit width"),
-            };
-
-            match instr {
-                Instruction::NoOp | Instruction::UNIMPL | Instruction::INLINE(_) => None,
-                // NOTE: The functions we would like to call on each instruction (`lookup_table`
-                // and `circuit_flags`) panic on inline sequences. We check to see if
-                // `inline_sequence` returns a non-empty vector in order to filter out inline
-                // sequences here.
-                _ if !instr.inline_sequence(&allocator, xlen).is_empty() => None,
-                _ => Some(Self::from(instr)),
-            }
+        Instruction::iter().filter_map(|instr| match instr {
+            Instruction::NoOp | Instruction::UNIMPL | Instruction::INLINE(_) => None,
+            _ if instr.try_jolt_instruction_row().is_ok() => Some(Self::from(instr)),
+            _ => None,
         })
     }
 
@@ -105,18 +92,19 @@ impl<J: JoltParameterSet> ZkLeanInstruction<J> {
         let name = self.name();
         let num_variables = 2 * J::XLEN;
         let interleaving = self.interleaving;
-        let lookup_table = match self
-            .instruction
-            .lookup_table()
-            .map(|t| ZkLeanLookupTable::from(t).name())
+        let instruction = JoltInstruction::from(self.row);
+        let lookup_table = match InstructionLookupTable::<XLEN>::lookup_table(&instruction)
+            .map(|table| ZkLeanLookupTable::from(table).name())
         {
             None => String::from("sorry /-No lookup table for this instruction-/"),
             Some(t) => format!("{t} : Vector f {num_variables} -> f"),
         };
-        let circuit_flags = CircuitFlags::iter()
+        let circuit_flags = CIRCUIT_FLAGS
+            .iter()
+            .copied()
             .filter_map(|f| {
-                if self.instruction.circuit_flags()[f] {
-                    Some(input_to_field_name(&JoltR1CSInputs::OpFlags(f)))
+                if instruction.circuit_flags()[f] {
+                    Some(circuit_flag_field_name(f))
                 } else {
                     None
                 }
@@ -165,7 +153,7 @@ impl<J: JoltParameterSet> ZkLeanInstructions<J> {
     }
 
     pub fn zklean_imports(&self) -> Vec<String> {
-        vec![String::from("ZkLean"), String::from("Jolt.LookupTables")]
+        vec![String::from("zkLean"), String::from("Jolt.LookupTables")]
     }
 }
 

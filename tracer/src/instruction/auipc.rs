@@ -1,3 +1,4 @@
+use crate::instruction::registers::u::RegisterStateU;
 use serde::{Deserialize, Serialize};
 
 use crate::{declare_riscv_instr, emulator::cpu::Cpu};
@@ -12,14 +13,18 @@ declare_riscv_instr!(
     mask   = 0x0000007f,
     match  = 0x00000017,
     format = FormatU,
+    registers = RegisterStateU,
     ram    = ()
 );
 
 impl AUIPC {
-    fn exec(&self, cpu: &mut Cpu, _: &mut <AUIPC as RISCVInstruction>::RAMAccess) {
+    fn exec(&self, cpu: &mut Cpu, _: &mut <AUIPC as RISCVInstruction>::RamAccess) {
         let pc = self.address as i64;
-        let imm = normalize_imm(self.operands.imm, &cpu.xlen);
-        cpu.x[self.operands.rd as usize] = cpu.sign_extend(pc.wrapping_add(imm));
+        let imm = normalize_imm(self.operands.imm);
+        cpu.write_register(
+            self.operands.rd as usize,
+            cpu.sign_extend(pc.wrapping_add(imm)),
+        );
     }
 }
 

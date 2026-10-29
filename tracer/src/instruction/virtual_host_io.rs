@@ -1,21 +1,23 @@
+use crate::instruction::registers::no_operands::RegisterStateNoOperands;
 use serde::{Deserialize, Serialize};
 
 use jolt_platform::{JOLT_ADVICE_WRITE_CALL_ID, JOLT_CYCLE_TRACK_CALL_ID, JOLT_PRINT_CALL_ID};
 
 use crate::{declare_riscv_instr, emulator::cpu::Cpu};
 
-use super::{format::format_i::FormatI, RISCVInstruction, RISCVTrace};
+use super::{format::format_no_operands::FormatNoOperands, RISCVInstruction, RISCVTrace};
 
 declare_riscv_instr!(
     name   = VirtualHostIO,
     mask   = 0,
     match  = 0,
-    format = FormatI,
+    format = FormatNoOperands,
+    registers = RegisterStateNoOperands,
     ram    = ()
 );
 
 impl VirtualHostIO {
-    fn exec(&self, cpu: &mut Cpu, _: &mut <VirtualHostIO as RISCVInstruction>::RAMAccess) {
+    fn exec(&self, cpu: &mut Cpu, _: &mut <VirtualHostIO as RISCVInstruction>::RamAccess) {
         let call_id = cpu.x[10] as u32;
 
         if call_id == JOLT_ADVICE_WRITE_CALL_ID {

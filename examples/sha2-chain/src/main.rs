@@ -7,12 +7,10 @@ pub fn main() {
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_sha2_chain(target_dir);
 
-    let shared_preprocessing = guest::preprocess_shared_sha2_chain(&mut program);
+    let shared_preprocessing = guest::preprocess_shared_sha2_chain(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_sha2_chain(shared_preprocessing.clone());
-    let verifier_preprocessing = guest::preprocess_verifier_sha2_chain(
-        shared_preprocessing,
-        prover_preprocessing.generators.to_verifier_setup(),
-    );
+    let verifier_preprocessing =
+        guest::verifier_preprocessing_from_prover_sha2_chain(&prover_preprocessing);
 
     let prove_sha2_chain = guest::build_prover_sha2_chain(program, prover_preprocessing);
     let verify_sha2_chain = guest::build_verifier_sha2_chain(verifier_preprocessing);
@@ -23,10 +21,10 @@ pub fn main() {
     let now = Instant::now();
     let (output, proof, program_io) = prove_sha2_chain(input, iters);
     info!("Prover runtime: {} s", now.elapsed().as_secs_f64());
-    let is_valid = verify_sha2_chain(input, iters, output, program_io.panic, proof);
+    verify_sha2_chain(input, iters, output, program_io.panic, proof)
+        .expect("proof verification failed");
 
     assert_eq!(output, native_output, "output mismatch");
     info!("output: {}", hex::encode(output));
     info!("native_output: {}", hex::encode(native_output));
-    info!("valid: {is_valid}");
 }

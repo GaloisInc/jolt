@@ -8,12 +8,10 @@ pub fn main() {
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_merkle_tree(target_dir);
 
-    let shared_preprocessing = guest::preprocess_shared_merkle_tree(&mut program);
+    let shared_preprocessing = guest::preprocess_shared_merkle_tree(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_merkle_tree(shared_preprocessing.clone());
-    let verifier_preprocessing = guest::preprocess_verifier_merkle_tree(
-        shared_preprocessing,
-        prover_preprocessing.generators.to_verifier_setup(),
-    );
+    let verifier_preprocessing =
+        guest::verifier_preprocessing_from_prover_merkle_tree(&prover_preprocessing);
 
     let leaf1: &[u8] = &[5u8; 32];
     let leaf2 = [6u8; 32];
@@ -25,6 +23,7 @@ pub fn main() {
         TrustedAdvice::new(leaf3),
         &prover_preprocessing,
     );
+    let verifier_trusted_advice_commitment = trusted_advice_commitment.clone();
 
     let prove_merkle_tree = guest::build_prover_merkle_tree(program, prover_preprocessing.clone());
     let verify_merkle_tree = guest::build_verifier_merkle_tree(verifier_preprocessing);
@@ -40,15 +39,14 @@ pub fn main() {
     );
     info!("Prover runtime: {} s", now.elapsed().as_secs_f64());
 
-    // Pass only the first input and trusted_advice commitment to the verifier
-    let is_valid = verify_merkle_tree(
+    verify_merkle_tree(
         leaf1,
         output,
         program_io.panic,
-        trusted_advice_commitment,
+        verifier_trusted_advice_commitment,
         proof,
-    );
+    )
+    .expect("proof verification failed");
 
     info!("output: {}", hex::encode(output));
-    info!("valid: {is_valid}");
 }

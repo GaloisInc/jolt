@@ -1,9 +1,4 @@
-//! Generic test harness for inline instructions.
-//!
-//! Provides a unified testing framework for all inline instructions,
-//! eliminating the need for inline-specific test harnesses.
-
-use crate::emulator::cpu::{Cpu, Xlen};
+use crate::emulator::cpu::Cpu;
 use crate::emulator::default_terminal::DefaultTerminal;
 use crate::emulator::mmu::DRAM_BASE;
 use crate::instruction::format::format_inline::FormatInline;
@@ -25,7 +20,6 @@ pub struct InlineMemoryLayout {
     pub input2_size: Option<usize>,
     pub output_base: u64,
     pub output_size: usize,
-    // Register mappings: which memory region does each register point to
     pub rs1_mapping: RegisterMapping,
     pub rs2_mapping: RegisterMapping,
     pub rs3_mapping: Option<RegisterMapping>,
@@ -64,7 +58,6 @@ impl InlineMemoryLayout {
     }
 }
 
-// Standard register indices used by inline instructions
 pub const INLINE_RS1: u8 = 10;
 pub const INLINE_RS2: u8 = 11;
 pub const INLINE_RS3: u8 = 12;
@@ -72,17 +65,13 @@ pub const INLINE_RS3: u8 = 12;
 pub struct InlineTestHarness {
     pub cpu: Cpu,
     layout: InlineMemoryLayout,
-    xlen: Xlen,
 }
 
 impl InlineTestHarness {
-    pub fn new(layout: InlineMemoryLayout, xlen: Xlen) -> Self {
+    pub fn new(layout: InlineMemoryLayout) -> Self {
         let mut cpu = Cpu::new(Box::new(DefaultTerminal::default()));
         cpu.get_mut_mmu().init_memory(TEST_MEMORY_CAPACITY);
-        if xlen == Xlen::Bit32 {
-            cpu.update_xlen(Xlen::Bit32);
-        }
-        Self { cpu, layout, xlen }
+        Self { cpu, layout }
     }
 
     pub fn load_input32(&mut self, data: &[u32]) {
@@ -229,7 +218,6 @@ impl InlineTestHarness {
     }
 
     pub fn setup_registers(&mut self) {
-        // Set up registers based on the layout's mappings
         self.cpu.x[INLINE_RS1 as usize] =
             self.get_address_for_mapping(self.layout.rs1_mapping) as i64;
         self.cpu.x[INLINE_RS2 as usize] =
@@ -272,9 +260,5 @@ impl InlineTestHarness {
 
     pub fn create_default_instruction(opcode: u32, funct3: u32, funct7: u32) -> INLINE {
         Self::create_instruction(opcode, funct3, funct7, INLINE_RS1, INLINE_RS2, INLINE_RS3)
-    }
-
-    pub fn xlen(&self) -> Xlen {
-        self.xlen
     }
 }

@@ -1,0 +1,63 @@
+use std::path::Path;
+
+use rust_code_analysis::FuncSpace;
+
+use super::lloc::{analyze_rust_file, rust_files_in_crates};
+use super::PROOF_SYSTEM_CRATE_DIRS;
+use crate::objective::{
+    MeasurementError, Objective, OptimizationObjective, StaticAnalysisObjective,
+};
+
+pub const HALSTEAD_BUGS: OptimizationObjective = OptimizationObjective::StaticAnalysis(
+    StaticAnalysisObjective::HalsteadBugs(HalsteadBugsObjective {
+        crate_dirs: PROOF_SYSTEM_CRATE_DIRS,
+    }),
+);
+
+/// Estimated number of delivered bugs across all Rust files under
+/// the modular proof system, based on Halstead's bug prediction formula
+/// (B = V / 3000, where V is program volume).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HalsteadBugsObjective {
+    pub(crate) crate_dirs: &'static [&'static str],
+}
+
+impl HalsteadBugsObjective {
+    pub fn collect_measurement_in(&self, repo_root: &Path) -> Result<f64, MeasurementError> {
+        let mut total = 0.0;
+        for path in rust_files_in_crates(repo_root, self.crate_dirs)? {
+            if let Some(space) = analyze_rust_file(&path) {
+                total += sum_bugs(&space);
+            }
+        }
+        Ok(total)
+    }
+}
+
+impl Objective for HalsteadBugsObjective {
+    type Setup = ();
+
+    fn name(&self) -> &str {
+        "halstead_bugs"
+    }
+
+    fn description(&self) -> String {
+        "Estimated delivered bugs (Halstead volume / 3000) in the modular proof system".to_string()
+    }
+
+    fn setup(&self) {}
+
+    fn collect_measurement(&self) -> Result<f64, MeasurementError> {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        self.collect_measurement_in(repo_root)
+    }
+}
+
+fn sum_bugs(space: &FuncSpace) -> f64 {
+    let b = space.metrics.halstead.bugs();
+    let mut total = if b.is_finite() { b } else { 0.0 };
+    for child in &space.spaces {
+        total += sum_bugs(child);
+    }
+    total
+}

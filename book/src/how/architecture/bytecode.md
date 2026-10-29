@@ -6,7 +6,7 @@ To prove the correctness of these lookups, we use the [Shout](../twist-shout.md)
 
 One distinguishing feature of the bytecode Shout instance is that we have multiple instances of the read-checking and $\widetilde{\textsf{raf}}$-evaluation sumchecks.
 Intuitively, the bytecode serves as the "ground truth" of what's being executed, so one would expect many virtual polynomial claims to eventually lead back to the bytecode.
-And this holds in practice –– in the Jolt sumcheck [DAG](./architecture/architecture.md##sumchecks-as-nodes) diagram, we see that there are five stages of read-checking claims pointing to the bytecode read-checking node, and two $\widetilde{\textsf{raf}}$ evaluation claims folded into stages 1 and 3.
+And this holds in practice –– in the Jolt sumcheck [DAG](./architecture.md#sumchecks-as-nodes) diagram, we see that there are five stages of read-checking claims pointing to the bytecode read-checking node, and two $\widetilde{\textsf{raf}}$ evaluation claims folded into stages 1 and 3.
 
 Each stage has its own unique opening point, so having in-edges of different colors implies that multiple instances of that sumcheck must be run in [parallel](../optimizations/batched-sumcheck.md) to prove the different claims.
 
@@ -26,6 +26,12 @@ We start from some ELF file, compiled from the guest program. For each instructi
 - The instruction [address](#instruction-address)
 
 Then, we compute a [Reed-Solomon fingerprint](https://publish.obsidian.md/matteo/3.+Permanent+notes/Reed-Solomon+Fingerprinting) of some subset of the values in the tuple, depending on what $\widetilde{\textsf{rv}}$ claims are being proven. These fingerprints serve as the coefficients of the $\widetilde{\textsf{Val}}$ polynomial for that read-checking instance.
+
+### Trace-time validation
+
+The tracer's `cycle_to_trace_row` takes `BytecodePreprocessing` and checks each executed instruction against its preprocessed row before returning a trace row. The comparison includes the opcode, normalized operands, address, compression flag, and virtual-sequence metadata; runtime register values, memory observations, and advice are not part of this comparison. A difference returns `TraceError::BytecodeInstructionMismatch` with the bytecode PC and expected/actual instructions. An unavailable address or expansion position returns `MissingBytecodePc`.
+
+This is a host-side diagnostic in addition to the verifier's bytecode read-checking constraint. The emulator still fetches from mutable memory: self-modifying instructions that differ from the preprocessed ELF image remain unsupported. Eager tracing validates during row conversion; chunked execution validates during replay before returning the affected rows, not during its checkpoint-producing first pass.
 
 ## $\widetilde{\textsf{raf}}$-evaluation
 
@@ -58,7 +64,7 @@ Additionally, bytecode $\widetilde{\textsf{raf}}$ claims for the program counter
 The overall sumcheck proves the following identity:
 
 $$
-\sum_{s=1}^{5} \gamma^{s-1} \cdot \widetilde{\textsf{rv}}_s(r_s) + \gamma^5 \cdot \widetilde{\textsf{raf}}_1(r_1) + \gamma^6 \cdot \widetilde{\textsf{raf}}_3(r_3) = \sum_{j, k} \widetilde{\textsf{ra}}(k, j) \cdot \left[\sum_{s=1}^{5} \gamma^{s-1} \cdot \widetilde{\textsf{eq}}_s(r_s, j) \cdot \widetilde{\textsf{Val}}_s(k) + \gamma^5 \cdot \widetilde{\textsf{eq}}_1(r_1, j) \cdot \widetilde{\textsf{Int}}(k) + \gamma^6 \cdot \widetilde{\textsf{eq}}_3(r_3, j) \cdot \widetilde{\textsf{Int}}(k)\right]
+\sum_{s=1}^{5} \gamma^{s-1} \cdot \widetilde{\textsf{rv}}_s(r_s) + \gamma^5 \cdot \widetilde{\textsf{raf}}_1(r_1) + \gamma^6 \cdot \widetilde{\textsf{raf}}_3(r_3) + \gamma^7 = \sum_{j, k} \widetilde{\textsf{ra}}(k, j) \cdot \left[\sum_{s=1}^{5} \gamma^{s-1} \cdot \widetilde{\textsf{eq}}_s(r_s, j) \cdot \widetilde{\textsf{Val}}_s(k) + \gamma^5 \cdot \widetilde{\textsf{eq}}_1(r_1, j) \cdot \widetilde{\textsf{Int}}(k) + \gamma^6 \cdot \widetilde{\textsf{eq}}_3(r_3, j) \cdot \widetilde{\textsf{Int}}(k) + \gamma^7 \cdot \widetilde{\textsf{eq}}_0(j) \cdot \widetilde{C}_{k^*}(k)\right]
 $$
 
 where:
@@ -67,10 +73,16 @@ where:
 - $\widetilde{\textsf{ra}}(k, j)$ is the read access polynomial indicating cycle $j$ accesses bytecode row $k$
 - $\widetilde{\textsf{Val}}_s(k)$ is the stage-specific value polynomial encoding instruction data
 - $\widetilde{\textsf{Int}}(k)$ is the identity polynomial that converts a bytecode index from binary form $k \in \{0, 1\}^K$ to the corresponding field element $\widetilde{\textsf{Int}}(k) \in \mathbb{F}$ (used for $\widetilde{\textsf{raf}}$ claims)
+- $\widetilde{\textsf{eq}}_0(j) = \prod_i (1 - j_i)$ is the multilinear indicator for $j = 0$
+- $\widetilde{C}_{k^*}(k)$ is the multilinear indicator for $k = k^*$, where $k^*$ is the bytecode index of the ELF entry point
 - $\gamma$ is the stage-folding challenge
 - $\beta_s$ challenges are used within each $\widetilde{\textsf{Val}}_s(k)$ to combine multiple sub-claims
 
 Note that the $\widetilde{\textsf{raf}}$ claims treat the *expanded* program counter as $\widetilde{\textsf{ra}}$, not `UnexpandedPC`.
+
+### Entry-point constraint
+
+The $\gamma^7$ term enforces that execution begins at the ELF entry point. Both prover and verifier add $\gamma^7$ unconditionally to the left-hand side. An honest trace satisfies $\widetilde{\textsf{ra}}(k^*, 0) = 1$, so the new right-hand side term also sums to $\gamma^7$. If the committed trace starts at any other instruction, the sumcheck fails. No additional opening proof is required — the term reduces to the same $(r_\text{addr}, r_\text{cycle})$ opening point as the rest of the sumcheck.
 
 ### Stage $\widetilde{\textsf{Val}}$ Polynomials
 
@@ -155,9 +167,15 @@ In the final $\log T$ rounds, cycle variables are bound, also in **low-to-high**
 
 The sumcheck univariate in this phase has degree $d + 1$.
 
-The chunking parameter $d$ is chosen based on the bytecode size to balance prover time and proof size. Larger $d$ reduces the number of committed RA polynomials but increases the degree (and thus the cost per round) of the sumcheck.
+The address decomposition has $d$ committed RA polynomials, and the cycle-phase sumcheck has degree $d + 1$. This address-bit chunking remains in both backends; it does not partition the committed bytecode table.
 
 ## One-hot checks
 
 Jolt enforces that the $\widetilde{\textsf{ra}}_i$ polynomials used for bytecode Shout are [one-hot](../twist-shout.md#one-hot-polynomials), using a Booleanity and Hamming weight sumcheck as described in the paper.
 These implementations follow the Twist and Shout paper closely, with no notable deviations.
+
+## Committed-program bytecode
+
+In committed-program mode, Dory and Akita each commit one whole-bytecode polynomial (`ProgramBytecode`), with nine lane variables and one variable per bit of the padded bytecode row index. Neither backend exposes a bytecode-table chunk count.
+
+Dory embeds the balanced bytecode matrix into the joint opening grid. If that matrix exceeds the trace grid, the bytecode enlarges the joint grid and the precommitted reduction schedule, potentially increasing proving time and memory. A trace smaller than the bytecode remains supported. Akita gives bytecode its own polynomial group and opening point, so its bytecode arity is independent of the trace group.

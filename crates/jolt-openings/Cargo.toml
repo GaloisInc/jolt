@@ -1,0 +1,35 @@
+[package]
+name = "jolt-openings"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Polynomial commitment scheme traits and batch openings for the Jolt zkVM"
+
+[lints]
+workspace = true
+
+[dependencies]
+jolt-crypto = { path = "../jolt-crypto", default-features = false }
+jolt-field = { path = "../jolt-field", default-features = false }
+jolt-poly = { path = "../jolt-poly", default-features = false, features = [
+  "transcript",
+] }
+jolt-transcript = { path = "../jolt-transcript", default-features = false }
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["bn254", "parallel"]
+bn254 = ["jolt-crypto/bn254", "jolt-field/bn254"]
+parallel = ["jolt-crypto/parallel", "jolt-poly/parallel"]
+
+[dev-dependencies]
+jolt-dory.workspace = true
+jolt-crypto = { workspace = true, features = ["bn254"] }
+jolt-transcript = { workspace = true, features = [
+  "bn254",
+  "transcript-blake2b",
+] }
+rand_chacha.workspace = true
+rand_core.workspace = true

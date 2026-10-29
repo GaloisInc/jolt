@@ -1,0 +1,197 @@
+use std::marker::PhantomData;
+
+use jolt_crypto::{Commitment, HomomorphicCommitment};
+use jolt_field::JoltField;
+use jolt_openings::{AdditivelyHomomorphic, CommitmentScheme, OpeningsError, ZkOpeningScheme};
+use jolt_poly::{MultilinearPoly, Polynomial};
+use jolt_transcript::{Encoding, FieldTranscript};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct MockCommitmentScheme<F: JoltField>(PhantomData<F>);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: DeserializeOwned"))]
+pub struct MockCommitment<F: JoltField> {
+    evaluations: Vec<F>,
+}
+
+impl<F: JoltField> Default for MockCommitment<F> {
+    fn default() -> Self {
+        Self {
+            evaluations: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: DeserializeOwned"))]
+pub struct MockProof<F: JoltField> {
+    evaluations: Vec<F>,
+}
+
+impl<F: JoltField> Encoding for MockCommitment<F> {
+    fn encode(&self) -> impl AsRef<[u8]> {
+        self.evaluations
+            .iter()
+            .flat_map(|evaluation| evaluation.encode().as_ref().to_vec())
+            .collect::<Vec<u8>>()
+    }
+}
+
+impl<F> Commitment for MockCommitmentScheme<F>
+where
+    F: JoltField + Serialize + DeserializeOwned,
+{
+    type Output = MockCommitment<F>;
+}
+
+impl<F> CommitmentScheme for MockCommitmentScheme<F>
+where
+    F: JoltField + Serialize + DeserializeOwned,
+{
+    type Field = F;
+    type Proof = MockProof<F>;
+    type ProverSetup = ();
+    type VerifierSetup = ();
+    type OpeningHint = ();
+    type SetupParams = ();
+
+    fn setup(_params: Self::SetupParams) -> Result<((), ()), OpeningsError> {
+        Ok(((), ()))
+    }
+
+    fn verifier_setup(_prover_setup: &()) {}
+
+    fn commit<P: MultilinearPoly<Self::Field> + ?Sized>(
+        poly: &P,
+        _setup: &Self::ProverSetup,
+    ) -> Result<(Self::Output, ()), OpeningsError> {
+        let evaluations = poly.to_dense().into_owned();
+        Ok((MockCommitment { evaluations }, ()))
+    }
+
+    fn open<P: MultilinearPoly<Self::Field> + ?Sized>(
+        poly: &P,
+        _point: &[Self::Field],
+        _eval: Self::Field,
+        _setup: &Self::ProverSetup,
+        _hint: Option<()>,
+        _transcript: &mut impl FieldTranscript<Self::Field>,
+    ) -> Result<Self::Proof, OpeningsError> {
+        let evaluations = poly.to_dense().into_owned();
+        Ok(MockProof { evaluations })
+    }
+
+    fn verify(
+        commitment: &Self::Output,
+        point: &[Self::Field],
+        eval: Self::Field,
+        proof: &Self::Proof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl FieldTranscript<Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        if commitment.evaluations != proof.evaluations {
+            return Err(OpeningsError::VerificationFailed);
+        }
+        let poly = Polynomial::new(proof.evaluations.clone());
+        if poly.evaluate(point) != eval {
+            return Err(OpeningsError::VerificationFailed);
+        }
+        Ok(())
+    }
+}
+
+impl<F: JoltField> HomomorphicCommitment<F> for MockCommitment<F> {
+    fn add(c1: &Self, c2: &Self) -> Self {
+        Self::linear_combine(c1, c2, &F::one())
+    }
+
+    fn linear_combine(c1: &Self, c2: &Self, scalar: &F) -> Self {
+        let len = c1.evaluations.len().max(c2.evaluations.len());
+        let mut result = vec![F::zero(); len];
+        for (i, r) in result.iter_mut().enumerate() {
+            let a = c1.evaluations.get(i).copied().unwrap_or_else(F::zero);
+            let b = c2.evaluations.get(i).copied().unwrap_or_else(F::zero);
+            *r = a + *scalar * b;
+        }
+        Self {
+            evaluations: result,
+        }
+    }
+}
+
+impl<F> AdditivelyHomomorphic for MockCommitmentScheme<F>
+where
+    F: JoltField + Serialize + DeserializeOwned,
+{
+    fn combine(commitments: &[Self::Output], scalars: &[Self::Field]) -> Self::Output {
+        assert_eq!(commitments.len(), scalars.len());
+        let len = commitments.first().map_or(0, |c| c.evaluations.len());
+        let mut result = vec![F::zero(); len];
+        for (commitment, scalar) in commitments.iter().zip(scalars.iter()) {
+            for (result, evaluation) in result.iter_mut().zip(commitment.evaluations.iter()) {
+                *result += *scalar * *evaluation;
+            }
+        }
+        MockCommitment {
+            evaluations: result,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: DeserializeOwned"))]
+pub struct MockHidingCommitment<F: JoltField> {
+    pub eval: F,
+}
+
+impl<F: JoltField> Encoding for MockHidingCommitment<F> {
+    fn encode(&self) -> impl AsRef<[u8]> {
+        self.eval.encode()
+    }
+}
+
+impl<F> ZkOpeningScheme for MockCommitmentScheme<F>
+where
+    F: JoltField + Serialize + DeserializeOwned,
+{
+    type HidingCommitment = MockHidingCommitment<F>;
+    type Blind = ();
+
+    fn commit_zk<P: MultilinearPoly<Self::Field> + ?Sized>(
+        poly: &P,
+        setup: &Self::ProverSetup,
+    ) -> Result<(Self::Output, Self::OpeningHint), OpeningsError> {
+        Self::commit(poly, setup)
+    }
+
+    fn open_zk<P: MultilinearPoly<Self::Field> + ?Sized>(
+        poly: &P,
+        _point: &[Self::Field],
+        eval: Self::Field,
+        _setup: &Self::ProverSetup,
+        _hint: Self::OpeningHint,
+        _transcript: &mut impl FieldTranscript<Self::Field>,
+    ) -> Result<(Self::Proof, Self::HidingCommitment, Self::Blind), OpeningsError> {
+        let evaluations = poly.to_dense().into_owned();
+        Ok((MockProof { evaluations }, MockHidingCommitment { eval }, ()))
+    }
+
+    fn verify_zk(
+        commitment: &Self::Output,
+        point: &[Self::Field],
+        proof: &Self::Proof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl FieldTranscript<Self::Field>,
+    ) -> Result<Self::HidingCommitment, OpeningsError> {
+        if commitment.evaluations != proof.evaluations {
+            return Err(OpeningsError::VerificationFailed);
+        }
+        let poly = Polynomial::new(proof.evaluations.clone());
+        Ok(MockHidingCommitment {
+            eval: poly.evaluate(point),
+        })
+    }
+}

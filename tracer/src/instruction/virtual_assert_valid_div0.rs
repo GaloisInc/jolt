@@ -1,9 +1,7 @@
+use crate::instruction::registers::b::RegisterStateB;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    declare_riscv_instr,
-    emulator::cpu::{Cpu, Xlen},
-};
+use crate::{declare_riscv_instr, emulator::cpu::Cpu};
 
 use super::{format::format_b::FormatB, RISCVInstruction, RISCVTrace};
 
@@ -12,24 +10,16 @@ declare_riscv_instr!(
     mask = 0,
     match = 0,
     format = FormatB,
+    registers = RegisterStateB,
     ram = ()
 );
 
 impl VirtualAssertValidDiv0 {
-    fn exec(&self, cpu: &mut Cpu, _: &mut <VirtualAssertValidDiv0 as RISCVInstruction>::RAMAccess) {
+    fn exec(&self, cpu: &mut Cpu, _: &mut <VirtualAssertValidDiv0 as RISCVInstruction>::RamAccess) {
         let divisor = cpu.x[self.operands.rs1 as usize];
         let quotient = cpu.x[self.operands.rs2 as usize];
-        match cpu.xlen {
-            Xlen::Bit32 => {
-                if divisor == 0 {
-                    assert!(quotient as u64 as u32 == u32::MAX);
-                }
-            }
-            Xlen::Bit64 => {
-                if divisor == 0 {
-                    assert!(quotient as u64 == u64::MAX);
-                }
-            }
+        if divisor == 0 {
+            assert!(quotient as u64 == u64::MAX);
         }
     }
 }

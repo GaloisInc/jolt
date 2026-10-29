@@ -1,15 +1,20 @@
 use crate::emulator::cpu::get_register_name;
 use crate::emulator::Emulator;
-use crate::instruction::format::NormalizedOperands;
 use common::constants::{REGISTER_COUNT, RISCV_REGISTER_COUNT};
 
-/// Represents a single function call for stack trace
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CallFrame {
     pub call_site: u64,
-    /// register snapshot
-    pub x: [i64; REGISTER_COUNT as usize],
-    pub operands: NormalizedOperands,
+    /// Register snapshot; captured only when `JOLT_BACKTRACE=full`, since
+    /// that's the only mode that displays it. Keeping capture opt-in avoids a
+    /// bulk register copy on every call instruction.
+    ///
+    /// Boxed because the snapshot is 1 KiB (`REGISTER_COUNT` = 128) and
+    /// `[i64; _]` has no niche, so an unboxed `Option` would still cost 1032
+    /// bytes per frame. `Option<Box<_>>` is pointer-sized, keeping `CallFrame`
+    /// at 24 bytes and the `MAX_CALL_STACK_DEPTH`-deep ring buffer — written on
+    /// every call instruction — a few cache lines instead of ~33 KiB.
+    pub x: Option<Box<[i64; REGISTER_COUNT as usize]>>,
     /// cycle count at the time of call
     pub cycle_count: usize,
 }
@@ -73,7 +78,6 @@ pub fn resolve_frame(loader: &addr2line::Loader, frame: &CallFrame) -> Option<Re
         }
     }
 
-    // Fallback to just symbol name
     if let Some(sym_name) = loader.find_symbol(addr) {
         let demangled = addr2line::demangle_auto(std::borrow::Cow::Borrowed(sym_name), None);
         return Some(ResolvedFrame {
@@ -87,7 +91,7 @@ pub fn resolve_frame(loader: &addr2line::Loader, frame: &CallFrame) -> Option<Re
 }
 
 fn shorten_path(path: &str) -> String {
-    const MAX_LENGTH: usize = 50; // Adjust as needed
+    const MAX_LENGTH: usize = 50;
 
     if path.len() <= MAX_LENGTH {
         return path.to_string();
@@ -101,16 +105,14 @@ fn shorten_path(path: &str) -> String {
     let mut total_len = filename.len();
 
     for component in components.iter().rev().skip(1) {
-        let new_len = total_len + component.len() + 1; // +1 for '/'
+        let new_len = total_len + component.len() + 1;
         if new_len > MAX_LENGTH - 4 {
-            // -4 for ".../""
             break;
         }
         result_components.insert(0, *component);
         total_len = new_len;
     }
 
-    // Add ellipsis if we truncated
     if result_components.len() < components.len() {
         format!(".../{}", result_components.join("/"))
     } else {
@@ -142,12 +144,15 @@ pub fn display_panic_backtrace(emulator_state: &Emulator) {
         }
     };
 
-    // Get panic location from most recent frame
-    let panic_info = if !call_stack.is_empty() && emulator_state.elf_path.is_some() {
-        if let Ok(loader) = addr2line::Loader::new(emulator_state.elf_path.as_ref().unwrap()) {
-            let last_frame = call_stack.back().unwrap();
-            resolve_frame(&loader, last_frame)
-                .map(|resolved| (resolved.function_name, resolved.location))
+    let panic_info = if !call_stack.is_empty() {
+        if let Some(elf_path) = emulator_state.elf_path.as_ref() {
+            if let Ok(loader) = addr2line::Loader::new(elf_path) {
+                let last_frame = call_stack.back().unwrap();
+                resolve_frame(&loader, last_frame)
+                    .map(|resolved| (resolved.function_name, resolved.location))
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -210,16 +215,17 @@ fn print_resolved_frame(resolved: &ResolvedFrame) {
 }
 
 fn print_extended_frame_info(frame: &CallFrame) {
-    let mut regs = vec![];
-    for i in 0..RISCV_REGISTER_COUNT {
-        let i = i as usize;
-        if frame.x[i] != 0 || i == 2 {
-            // Always show sp
-            regs.push(format!("{}={:#x}", get_register_name(i), frame.x[i]));
+    if let Some(x) = frame.x.as_deref() {
+        let mut regs = vec![];
+        for i in 0..RISCV_REGISTER_COUNT {
+            let i = i as usize;
+            if x[i] != 0 || i == 2 {
+                regs.push(format!("{}={:#x}", get_register_name(i), x[i]));
+            }
         }
-    }
-    if !regs.is_empty() {
-        println!("                   registers: {}", regs.join(", "));
+        if !regs.is_empty() {
+            println!("                   registers: {}", regs.join(", "));
+        }
     }
     println!("                   cycle: {}", frame.cycle_count);
     println!();

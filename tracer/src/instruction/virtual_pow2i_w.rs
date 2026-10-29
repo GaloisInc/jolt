@@ -1,9 +1,7 @@
+use crate::instruction::registers::j::RegisterStateJ;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    declare_riscv_instr,
-    emulator::cpu::{Cpu, Xlen},
-};
+use crate::{declare_riscv_instr, emulator::cpu::Cpu};
 
 use super::{format::format_j::FormatJ, RISCVInstruction, RISCVTrace};
 
@@ -12,15 +10,13 @@ declare_riscv_instr!(
     mask = 0,
     match = 0,
     format = FormatJ,
+    registers = RegisterStateJ,
     ram = ()
 );
 
 impl VirtualPow2IW {
-    fn exec(&self, cpu: &mut Cpu, _: &mut <VirtualPow2IW as RISCVInstruction>::RAMAccess) {
-        match cpu.xlen {
-            Xlen::Bit32 => panic!("VirtualPow2IW is invalid in 32b mode"),
-            Xlen::Bit64 => cpu.x[self.operands.rd as usize] = 1 << (self.operands.imm % 32),
-        }
+    fn exec(&self, cpu: &mut Cpu, _: &mut <VirtualPow2IW as RISCVInstruction>::RamAccess) {
+        cpu.write_register(self.operands.rd as usize, 1 << (self.operands.imm % 32))
     }
 }
 

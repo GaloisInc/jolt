@@ -1,0 +1,1342 @@
+mod product_sum;
+pub(crate) use product_sum::{LowDegreeProductSum, TailFactorProducts};
+
+use std::ops::Range;
+
+use jolt_field::{Accumulator, JoltField};
+use jolt_poly::{
+    BindingOrder, EqPolynomial, GruenSplitEqPolynomial, LtPolynomial, Polynomial, TensorEqTable,
+    UnivariatePoly,
+};
+use jolt_sumcheck::SumcheckError;
+#[cfg(feature = "parallel")]
+use jolt_utils::par_collect_windows;
+use jolt_verifier::stages::relations::{
+    ConcreteSumcheck, ConcreteSumcheckChallenges, DerivedIdOf, SumcheckInputPoints,
+    SumcheckOutputPoints,
+};
+use jolt_verifier::VerifierError;
+use jolt_witness::{
+    stream_witnesses, JoltWitnessPlane, RandomAccessRows, RowSource, StreamConsumer, WitnessBundle,
+    WitnessError,
+};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+use crate::SumcheckKernelError;
+
+/// A kernel's bound-round count against its total — the one home of the
+/// "claims only after every round is bound" invariant.
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
+pub(crate) struct RoundProgress {
+    bound: usize,
+    total: usize,
+}
+
+impl RoundProgress {
+    pub(crate) fn new(total: usize) -> Self {
+        Self { bound: 0, total }
+    }
+
+    /// Total rounds — the kernel's `ProveRounds::num_rounds`.
+    pub(crate) fn total(&self) -> usize {
+        self.total
+    }
+
+    pub(crate) fn bound(&self) -> usize {
+        self.bound
+    }
+
+    pub(crate) fn advance(&mut self) {
+        self.bound += 1;
+    }
+
+    /// Gate for every output-claim / derived-table entry point.
+    pub(crate) fn require_complete<F: JoltField>(&self) -> Result<(), SumcheckKernelError<F>> {
+        if self.bound == self.total {
+            Ok(())
+        } else {
+            Err(SumcheckKernelError::NotFullyBound {
+                remaining: self.total - self.bound,
+            })
+        }
+    }
+}
+
+/// The streaming chunk of [`collect_rows`]: large enough that the per-chunk
+/// rayon extraction dispatch amortizes (the stock bundle pass uses 2^12-row
+/// chunks — at 2^23 cycles the two thousand dispatches rival the extraction
+/// itself).
+const COLLECT_ROWS_CHUNK: usize = 1 << 16;
+
+pub(crate) fn collect_par_map<B: WitnessBundle, V: Copy + Send>(
+    access: &RandomAccessRows,
+    cycles: usize,
+    pack: impl Fn(B) -> V + Send + Sync,
+) -> Result<Vec<V>, WitnessError> {
+    let window = |index| access.window::<B>(index).map(&pack);
+    #[cfg(feature = "parallel")]
+    return par_collect_windows(cycles, window);
+    #[cfg(not(feature = "parallel"))]
+    (0..cycles).map(window).collect()
+}
+
+/// `jolt_witness::collect_bundles` with a wider streaming chunk and a
+/// pre-sized destination (the stock pass also grows its vector realloc by
+/// realloc). Chunk size never changes the collected bundles — the pass
+/// carries the lookahead row across chunk boundaries — so this is walk-shape
+/// only.
+pub(crate) fn collect_rows<B: WitnessBundle + Copy + Send + Sync>(
+    source: &(impl RowSource + ?Sized),
+    cycles: usize,
+) -> Result<Vec<B>, WitnessError> {
+    if let Some(access) = source.random_access() {
+        if cycles <= access.cycles() {
+            return collect_par_map(&access, cycles, |bundle: B| bundle);
+        }
+    }
+    struct Presized<B> {
+        rows: Vec<B>,
+    }
+    impl<B: WitnessBundle + Copy + Send + Sync> StreamConsumer for Presized<B> {
+        type Witness = B;
+
+        fn consume(&mut self, chunk: &[B]) {
+            self.rows.extend_from_slice(chunk);
+        }
+    }
+    let mut consumers = (Presized::<B> {
+        rows: Vec::with_capacity(cycles),
+    },);
+    stream_witnesses(source, 0..cycles, COLLECT_ROWS_CHUNK, &mut consumers)?;
+    Ok(consumers.0.rows)
+}
+
+/// Largest factor count [`accumulate_product_grid`] accepts; `n!` must fit a
+/// `u64` for the finite-difference extension. Kernels whose factor count
+/// follows the one-hot chunk widths reject a larger one at construction.
+pub(crate) const MAX_GRID_FACTORS: usize = 20;
+
+/// Scratch length [`accumulate_product_grid`] needs for `n` factors: two
+/// child tables per tree level plus one difference table.
+pub(crate) const fn product_grid_scratch_len(n: usize) -> usize {
+    6 * n + 2
+}
+
+/// Largest factor count whose grid is cheaper to walk directly (every
+/// factor multiplied at every point) than through the product tree.
+const DIRECT_GRID_FACTORS: usize = 4;
+
+/// Accumulates `Π factors` into `lane`, fusing the last multiply into the
+/// deferred-reduction accumulator. Requires at least two factors.
+#[inline]
+fn accumulate_product<F: JoltField>(factors: &[F], lane: &mut F::Accumulator) {
+    let last = factors.len() - 1;
+    let mut product = factors[0];
+    for factor in &factors[1..last] {
+        product *= *factor;
+    }
+    lane.fmadd(product, factors[last]);
+}
+
+/// Walk one row's product grid: with `evals` the `t = 1` values of `n`
+/// linear factors and `steps` their slopes, accumulate their product at
+/// `t = 1, …, n − 1` into `lanes[t − 1]` and its leading coefficient
+/// `Π steps` into `lanes[n − 1]`, where `n = lanes.len() ≥ 2`.
+///
+/// Above [`DIRECT_GRID_FACTORS`] the product is built as a balanced tree:
+/// each node multiplies its two halves pointwise at exactly as many points
+/// as its degree, after extending both halves to those points by finite
+/// differences (additions only). That costs `O(n log n)` multiplications
+/// instead of the `n · (n − 2)` of multiplying every factor at every point;
+/// the root's multiplications fuse into the deferred-reduction lanes.
+/// Four, five, eight, and nine factors take unrolled forms of the same tree that keep
+/// every table on the stack.
+/// `scratch` must hold [`product_grid_scratch_len`]`(n)` elements.
+#[inline]
+pub(crate) fn accumulate_product_grid<F: JoltField>(
+    evals: &[F],
+    steps: &[F],
+    lanes: &mut [F::Accumulator],
+    scratch: &mut [F],
+) {
+    let n = lanes.len();
+    debug_assert!((2..=MAX_GRID_FACTORS).contains(&n));
+    debug_assert_eq!(evals.len(), n);
+    debug_assert_eq!(steps.len(), n);
+    match (evals, steps, lanes) {
+        (
+            [a, b, c, d, e, f, g, h, i],
+            [da, db, dc, dd, de, df, dg, dh, di],
+            lanes @ [_, _, _, _, _, _, _, _, _],
+        ) if db.is_zero() && dc.is_zero() && dd.is_zero() && de.is_zero() => {
+            let constant = *b * *c * *d * *e;
+            let samples = quintic_product_samples([*a, *f, *g, *h, *i], [*da, *df, *dg, *dh, *di]);
+            let mut grid = [F::zero(); 8];
+            grid[..5].copy_from_slice(&samples[..5]);
+            extend_by_differences(&mut grid, 5, samples[5], scratch);
+            for (lane, value) in lanes[..8].iter_mut().zip(grid) {
+                lane.fmadd(constant, value);
+            }
+        }
+        (
+            [a, b, c, d, e, f, g, h, i],
+            [da, db, dc, dd, de, df, dg, dh, di],
+            lanes @ [_, _, _, _, _, _, _, _, _],
+        ) => {
+            let left = quartic_product_samples([*a, *b, *c, *d], [*da, *db, *dc, *dd]);
+            let right = quintic_product_samples([*e, *f, *g, *h, *i], [*de, *df, *dg, *dh, *di]);
+            let mut left_grid = [F::zero(); 8];
+            let mut right_grid = [F::zero(); 8];
+            left_grid[..4].copy_from_slice(&left[..4]);
+            right_grid[..5].copy_from_slice(&right[..5]);
+            extend_by_differences(&mut left_grid, 4, left[4], scratch);
+            extend_by_differences(&mut right_grid, 5, right[5], scratch);
+            for ((lane, left), right) in lanes[..8].iter_mut().zip(left_grid).zip(right_grid) {
+                lane.fmadd(left, right);
+            }
+            lanes[8].fmadd(left[4], right[5]);
+        }
+        ([a, b, c, d, e], [da, db, dc, dd, de], lanes @ [_, _, _, _, _]) => {
+            let left = quadratic_product_samples([*a, *b], [*da, *db]);
+            let right = quadratic_product_samples([*d, *e], [*dd, *de]);
+            let left_third = quadratic_next(left);
+            let right_third = quadratic_next(right);
+            let c_second = *c + *dc;
+            let c_third = c_second + *dc;
+            let cubic = [
+                *c * right[0],
+                c_second * right[1],
+                c_third * right_third,
+                *dc * right[2],
+            ];
+            let third_difference = cubic[3].mul_u64(6);
+            let cubic_next = cubic[2] - cubic[1];
+            let cubic_next = cubic_next + cubic_next + cubic_next + cubic[0] + third_difference;
+            let left_fourth = left_third + left[2];
+            let left_fourth = left_fourth + left_fourth - left[1];
+            lanes[0].fmadd(left[0], cubic[0]);
+            lanes[1].fmadd(left[1], cubic[1]);
+            lanes[2].fmadd(left_third, cubic[2]);
+            lanes[3].fmadd(left_fourth, cubic_next);
+            lanes[4].fmadd(left[2], cubic[3]);
+        }
+
+        ([a, b, c, d], [da, db, dc, dd], lanes @ [_, _, _, _]) => {
+            let left = quadratic_product_samples([*a, *b], [*da, *db]);
+            let right = quadratic_product_samples([*c, *d], [*dc, *dd]);
+            lanes[0].fmadd(left[0], right[0]);
+            lanes[1].fmadd(left[1], right[1]);
+            lanes[2].fmadd(quadratic_next(left), quadratic_next(right));
+            lanes[3].fmadd(left[2], right[2]);
+        }
+        (
+            [a, b, c, d, e, f, g, h],
+            [da, db, dc, dd, de, df, dg, dh],
+            lanes @ [_, _, _, _, _, _, _, _],
+        ) => {
+            let left = quartic_product_samples([*a, *b, *c, *d], [*da, *db, *dc, *dd]);
+            let right = quartic_product_samples([*e, *f, *g, *h], [*de, *df, *dg, *dh]);
+            let mut left_window = [left[0], left[1], left[2], left[3]];
+            let mut right_window = [right[0], right[1], right[2], right[3]];
+            for ((lane, left), right) in lanes.iter_mut().zip(left_window).zip(right_window) {
+                lane.fmadd(left, right);
+            }
+            let left_six = left[4].mul_u64(6);
+            let right_six = right[4].mul_u64(6);
+            for lane in &mut lanes[4..7] {
+                let left_next = quartic_next(left_window, left_six);
+                let right_next = quartic_next(right_window, right_six);
+                lane.fmadd(left_next, right_next);
+                left_window = [left_window[1], left_window[2], left_window[3], left_next];
+                right_window = [
+                    right_window[1],
+                    right_window[2],
+                    right_window[3],
+                    right_next,
+                ];
+            }
+            lanes[7].fmadd(left[4], right[4]);
+        }
+        (evals, steps, lanes) if n <= DIRECT_GRID_FACTORS => {
+            let point = &mut scratch[..n];
+            point.copy_from_slice(evals);
+            accumulate_product(point, &mut lanes[0]);
+            for lane in &mut lanes[1..n - 1] {
+                for (value, step) in point.iter_mut().zip(steps) {
+                    *value += *step;
+                }
+                accumulate_product(point, lane);
+            }
+            accumulate_product(steps, &mut lanes[n - 1]);
+        }
+        (evals, steps, lanes) => {
+            let mid = n / 2;
+            let (left, rest) = scratch.split_at_mut(n - 1);
+            let (right, rest) = rest.split_at_mut(n - 1);
+            let left_lead = linear_product(&evals[..mid], &steps[..mid], &mut left[..mid], rest);
+            let right_lead =
+                linear_product(&evals[mid..], &steps[mid..], &mut right[..n - mid], rest);
+            extend_by_differences(left, mid, left_lead, rest);
+            extend_by_differences(right, n - mid, right_lead, rest);
+            for ((lane, left), right) in lanes[..n - 1].iter_mut().zip(&*left).zip(&*right) {
+                lane.fmadd(*left, *right);
+            }
+            lanes[n - 1].fmadd(left_lead, right_lead);
+        }
+    }
+}
+
+#[inline]
+fn quintic_product_samples<F: JoltField>(values: [F; 5], steps: [F; 5]) -> [F; 6] {
+    let left = quadratic_product_samples([values[0], values[1]], [steps[0], steps[1]]);
+    let right = quadratic_product_samples([values[3], values[4]], [steps[3], steps[4]]);
+    let c_second = values[2] + steps[2];
+    let c_third = c_second + steps[2];
+    let mut cubic = [
+        values[2] * right[0],
+        c_second * right[1],
+        c_third * quadratic_next(right),
+        F::zero(),
+        F::zero(),
+    ];
+    let lead = steps[2] * right[2];
+    let mut scratch = [F::zero(); 6];
+    extend_by_differences(&mut cubic, 3, lead, &mut scratch);
+    let mut quad = [left[0], left[1], F::zero(), F::zero(), F::zero()];
+    extend_by_differences(&mut quad, 2, left[2], &mut scratch);
+    [
+        quad[0] * cubic[0],
+        quad[1] * cubic[1],
+        quad[2] * cubic[2],
+        quad[3] * cubic[3],
+        quad[4] * cubic[4],
+        left[2] * lead,
+    ]
+}
+
+#[inline]
+fn quadratic_product_samples<F: JoltField>(values: [F; 2], steps: [F; 2]) -> [F; 3] {
+    [
+        values[0] * values[1],
+        (values[0] + steps[0]) * (values[1] + steps[1]),
+        steps[0] * steps[1],
+    ]
+}
+
+#[inline]
+fn quadratic_next<F: JoltField>(samples: [F; 3]) -> F {
+    let next = samples[1] + samples[2];
+    next + next - samples[0]
+}
+
+#[inline]
+fn quartic_product_samples<F: JoltField>(values: [F; 4], steps: [F; 4]) -> [F; 5] {
+    let left = quadratic_product_samples([values[0], values[1]], [steps[0], steps[1]]);
+    let right = quadratic_product_samples([values[2], values[3]], [steps[2], steps[3]]);
+    let left_third = quadratic_next(left);
+    let right_third = quadratic_next(right);
+    let left_next = left_third + left[2];
+    let right_next = right_third + right[2];
+    [
+        left[0] * right[0],
+        left[1] * right[1],
+        left_third * right_third,
+        (left_next + left_next - left[1]) * (right_next + right_next - right[1]),
+        left[2] * right[2],
+    ]
+}
+
+#[inline]
+fn quartic_next<F: JoltField>(window: [F; 4], six_leading: F) -> F {
+    // The fourth finite difference is 24 times the leading coefficient.
+    let mut next = six_leading + window[3] - window[2] + window[1];
+    next = next + next - window[2];
+    next + next - window[0]
+}
+
+/// The product of the linear factors `values[i] + (t − 1) · steps[i]` at
+/// `t = 1, …, degree` into `out` (`degree = values.len() = out.len()`);
+/// returns its leading coefficient.
+fn linear_product<F: JoltField>(values: &[F], steps: &[F], out: &mut [F], scratch: &mut [F]) -> F {
+    let degree = values.len();
+    if degree == 1 {
+        out[0] = values[0];
+        return steps[0];
+    }
+    let mid = degree / 2;
+    let (left, rest) = scratch.split_at_mut(degree);
+    let (right, rest) = rest.split_at_mut(degree);
+    let left_lead = linear_product(&values[..mid], &steps[..mid], &mut left[..mid], rest);
+    let right_lead = linear_product(
+        &values[mid..],
+        &steps[mid..],
+        &mut right[..degree - mid],
+        rest,
+    );
+    extend_by_differences(left, mid, left_lead, rest);
+    extend_by_differences(right, degree - mid, right_lead, rest);
+    for ((out, left), right) in out.iter_mut().zip(&*left).zip(&*right) {
+        *out = *left * *right;
+    }
+    left_lead * right_lead
+}
+
+/// Extends a degree-`degree` polynomial known at `t = 1, …, degree`
+/// (`values[..degree]`) with leading coefficient `lead` to every
+/// `t ≤ values.len()`: the `degree`-th difference is the constant
+/// `degree! · lead`, so each new point costs `degree` additions after one
+/// backward-difference table at `t = degree`.
+#[inline(always)]
+fn extend_by_differences<F: JoltField>(
+    values: &mut [F],
+    degree: usize,
+    lead: F,
+    scratch: &mut [F],
+) {
+    const FACTORIALS: [u64; MAX_GRID_FACTORS + 1] = {
+        let mut table = [1u64; MAX_GRID_FACTORS + 1];
+        let mut i = 1;
+        while i <= MAX_GRID_FACTORS {
+            table[i] = table[i - 1] * i as u64;
+            i += 1;
+        }
+        table
+    };
+    if values.len() <= degree {
+        return;
+    }
+    let (known, unknown) = values.split_at_mut(degree);
+    if degree == 1 {
+        let mut value = known[0];
+        for next in unknown {
+            value += lead;
+            *next = value;
+        }
+        return;
+    }
+    // `back[k] = ∇^k p(degree)`: the last entry of each difference order.
+    let (work, back) = scratch.split_at_mut(degree);
+    let back = &mut back[..degree];
+    work.copy_from_slice(known);
+    back[0] = work[degree - 1];
+    for (order, last) in back.iter_mut().enumerate().skip(1) {
+        for i in (order..degree).rev() {
+            work[i] -= work[i - 1];
+        }
+        *last = work[degree - 1];
+    }
+    let top = if degree == 2 {
+        lead + lead
+    } else {
+        lead.mul_u64(FACTORIALS[degree])
+    };
+    for next in unknown {
+        let mut higher = top;
+        for difference in back.iter_mut().rev() {
+            *difference += higher;
+            higher = *difference;
+        }
+        *next = higher;
+    }
+}
+
+/// Accumulate `eq · F(value)` for a full-range `u64` on the small-scalar
+/// accumulator without overflowing it: the accumulator's headroom is one
+/// extra limb, which ~4 full-magnitude `field × u64` products exhaust, so the
+/// value is split into u32 halves (products ≤ 2^286, headroom ≥ 2^34 terms).
+/// `eq_shifted` must be `eq · 2^32`; the two fused adds sum to exactly
+/// `eq · F(value)`.
+#[inline]
+pub(crate) fn fmadd_u64_split<F: JoltField>(
+    accumulator: &mut F::SmallScalarAccumulator,
+    eq: F,
+    eq_shifted: F,
+    value: u64,
+) {
+    accumulator.fmadd_u64(eq_shifted, value >> 32);
+    accumulator.fmadd_u64(eq, value & 0xFFFF_FFFF);
+}
+
+/// `[1, γ, γ², …, γ^{N−1}]`.
+pub(crate) fn gamma_powers_array<F: JoltField, const N: usize>(gamma: F) -> [F; N] {
+    let mut powers = [F::one(); N];
+    for i in 1..N {
+        powers[i] = powers[i - 1] * gamma;
+    }
+    powers
+}
+
+/// `[1, γ, γ², …]` of length `count`.
+pub(crate) fn gamma_powers<F: JoltField>(gamma: F, count: usize) -> Vec<F> {
+    let mut powers = Vec::with_capacity(count);
+    let mut power = F::one();
+    for _ in 0..count {
+        powers.push(power);
+        power *= gamma;
+    }
+    powers
+}
+
+/// `scale · eq(point, ·)` evaluations, big-endian (`point[0]` pairs the index
+/// MSB) — the scaled variant of the reference tier's `eq_table`.
+pub(crate) fn scaled_eq_table<F: JoltField>(point: &[F], scale: F) -> Vec<F> {
+    EqPolynomial::<F>::evals(point, Some(scale))
+}
+
+/// `eq(point, ·)` evaluations, big-endian.
+pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Vec<F> {
+    EqPolynomial::<F>::evals(point, None)
+}
+
+/// The `(lo, hi)` sumcheck pair of a low-to-high-bound table at group `y`:
+/// the two evaluations whose linear extension `lo + t·(hi − lo)` is the
+/// table's per-round univariate restriction.
+#[inline(always)]
+pub(crate) fn pair<F: JoltField>(table: &Polynomial<F>, y: usize) -> (F, F) {
+    let evals = table.evals();
+    (evals[2 * y], evals[2 * y + 1])
+}
+
+/// Bind every table one round low-to-high, in place.
+pub(crate) fn bind_all<'a, F: JoltField>(
+    tables: impl IntoIterator<Item = &'a mut Polynomial<F>>,
+    challenge: F,
+) {
+    for table in tables {
+        table.bind_with_order(challenge, BindingOrder::LowToHigh);
+    }
+}
+
+/// In-place low-to-high bind of a raw table:
+/// `t[y] ← t[2y] + r·(t[2y+1] − t[2y])`.
+pub(crate) fn bind_pairs<F: JoltField>(table: &mut Vec<F>, r: F) {
+    let half = table.len() / 2;
+    for y in 0..half {
+        let even = table[2 * y];
+        table[y] = r.mul_add(table[2 * y + 1] - even, even);
+    }
+    table.truncate(half);
+}
+
+/// Low-bit-first binding of a prefix, with the missing odd endpoint supplied
+/// by its implicit suffix. Small prefixes reuse their allocation.
+pub(crate) fn bind_prefix_pairs<F: JoltField>(table: &mut Vec<F>, r: F, boundary: F) {
+    let len = table.len().div_ceil(2);
+    #[cfg(feature = "parallel")]
+    if len >= 1024 {
+        *table = table
+            .par_chunks(2)
+            .map(|pair| {
+                let lo = pair[0];
+                r.mul_add(pair.get(1).copied().unwrap_or(boundary) - lo, lo)
+            })
+            .collect();
+        return;
+    }
+    for index in 0..len {
+        let lo = table[2 * index];
+        let hi = table.get(2 * index + 1).copied().unwrap_or(boundary);
+        table[index] = r.mul_add(hi - lo, lo);
+    }
+    table.truncate(len);
+}
+
+/// The drawn challenges of a kernel's bound rounds, tracked against the
+/// round total — one authority for both the challenge history and the
+/// bound-rounds invariant. Kernels that never revisit their challenges use
+/// [`RoundProgress`] instead.
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
+pub(crate) struct RoundChallenges<F> {
+    challenges: Vec<F>,
+    total: usize,
+}
+
+impl<F: JoltField> RoundChallenges<F> {
+    pub(crate) fn new(total: usize) -> Self {
+        Self {
+            challenges: Vec::with_capacity(total),
+            total,
+        }
+    }
+
+    /// Total rounds — the kernel's `ProveRounds::num_rounds`.
+    pub(crate) fn total(&self) -> usize {
+        self.total
+    }
+
+    pub(crate) fn bound(&self) -> usize {
+        self.challenges.len()
+    }
+
+    pub(crate) fn push(&mut self, challenge: F) {
+        self.challenges.push(challenge);
+    }
+
+    /// The challenges bound so far, in binding order.
+    pub(crate) fn as_slice(&self) -> &[F] {
+        &self.challenges
+    }
+
+    /// Gate for every output-claim / derived-table entry point.
+    pub(crate) fn require_complete(&self) -> Result<(), SumcheckKernelError<F>> {
+        if self.challenges.len() == self.total {
+            Ok(())
+        } else {
+            Err(SumcheckKernelError::NotFullyBound {
+                remaining: self.total - self.challenges.len(),
+            })
+        }
+    }
+}
+
+/// Pin a kernel-maintained derived value (typically its fully bound split-eq
+/// scalar) against the verifier's own `derive_output_term` — the optimized
+/// tier's drift detector for tables it never materializes, mirroring the
+/// naive tier's check on its hand-materialized derived tables.
+pub(crate) fn pin_derived_term<F: JoltField, R: ConcreteSumcheck<F>>(
+    relation: &R,
+    id: DerivedIdOf<F, R>,
+    input_points: &SumcheckInputPoints<F, R>,
+    output_points: &SumcheckOutputPoints<F, R>,
+    challenges: &ConcreteSumcheckChallenges<F, R>,
+    got: F,
+) -> Result<(), SumcheckKernelError<F>> {
+    let expected = relation.derive_output_term(&id, input_points, output_points, challenges)?;
+    if got != expected {
+        return Err(SumcheckKernelError::DerivedTableDrift {
+            id: id.into(),
+            expected,
+            got,
+        });
+    }
+    Ok(())
+}
+
+/// [`pin_derived_term`], passing vacuously when the relation does not derive
+/// the term under this proof shape (`MissingStageClaimDerived`).
+pub(crate) fn pin_derived_term_if_derived<F: JoltField, R: ConcreteSumcheck<F>>(
+    relation: &R,
+    id: DerivedIdOf<F, R>,
+    input_points: &SumcheckInputPoints<F, R>,
+    output_points: &SumcheckOutputPoints<F, R>,
+    challenges: &ConcreteSumcheckChallenges<F, R>,
+    got: F,
+) -> Result<(), SumcheckKernelError<F>> {
+    match relation.derive_output_term(&id, input_points, output_points, challenges) {
+        Ok(expected) if got != expected => Err(SumcheckKernelError::DerivedTableDrift {
+            id: id.into(),
+            expected,
+            got,
+        }),
+        Ok(_) | Err(VerifierError::MissingStageClaimDerived { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) trait GruenRoundMessage<F: JoltField> {
+    /// `s(t) = ℓ(t) · q(t)` at `t = 0, 1, …, q_evals.len() − 1`, checked
+    /// against `s(0) + s(1) = previous_claim` (the reference tier's round
+    /// consistency pin) and interpolated through `UnivariatePoly::from_evals`.
+    /// `q_evals` is scaled into the `s` evaluations in place.
+    ///
+    /// This is the assembly half of the Gruen trick: the split-eq factor
+    /// contributes only its per-round linear term `ℓ`, so kernels sample the
+    /// remaining summand `q` alone and the product is restored per point —
+    /// never a full-domain eq-weighted sweep.
+    fn checked_round_poly(
+        &self,
+        q_evals: &mut [F],
+        previous_claim: F,
+        round: usize,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>>;
+
+    fn checked_cubic(
+        &self,
+        q_zero: F,
+        q_leading: F,
+        previous_claim: F,
+        round: usize,
+        q_at_one: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>>;
+
+    fn checked_toom(
+        &self,
+        q_evals: &[F],
+        previous_claim: F,
+        round: usize,
+        q_at_zero: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>>;
+
+    #[cfg(feature = "field-inline")]
+    fn checked_linear(
+        &self,
+        q_one: F,
+        previous_claim: F,
+        round: usize,
+        q_at_zero: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>>;
+}
+
+impl<F: JoltField> GruenRoundMessage<F> for GruenSplitEqPolynomial<F> {
+    fn checked_round_poly(
+        &self,
+        q_evals: &mut [F],
+        previous_claim: F,
+        round: usize,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        debug_assert!(q_evals.len() >= 2);
+        let (l_at_0, l_at_1) = self.current_linear_evals();
+        let l_step = l_at_1 - l_at_0;
+        let mut l_eval = l_at_0;
+        for q in q_evals.iter_mut() {
+            *q *= l_eval;
+            l_eval += l_step;
+        }
+
+        let round_sum = q_evals[0] + q_evals[1];
+        if round_sum != previous_claim {
+            return Err(SumcheckError::RoundCheckFailed {
+                round,
+                expected: previous_claim,
+                actual: round_sum,
+            });
+        }
+        Ok(UnivariatePoly::from_evals(q_evals))
+    }
+
+    fn checked_cubic(
+        &self,
+        q_zero: F,
+        q_leading: F,
+        previous_claim: F,
+        round: usize,
+        q_at_one: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        self.gruen_poly_deg_3(q_zero, q_leading, previous_claim, q_at_one)
+            .map_err(|actual| SumcheckError::RoundCheckFailed {
+                round,
+                expected: previous_claim,
+                actual,
+            })
+    }
+
+    fn checked_toom(
+        &self,
+        q_evals: &[F],
+        previous_claim: F,
+        round: usize,
+        q_at_zero: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        self.gruen_poly_from_evals(q_evals, previous_claim, q_at_zero)
+            .map_err(|actual| SumcheckError::RoundCheckFailed {
+                round,
+                expected: previous_claim,
+                actual,
+            })
+    }
+
+    #[cfg(feature = "field-inline")]
+    fn checked_linear(
+        &self,
+        q_one: F,
+        previous_claim: F,
+        round: usize,
+        q_at_zero: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        self.gruen_poly_deg_2(q_one, previous_claim, q_at_zero)
+            .map_err(|actual| SumcheckError::RoundCheckFailed {
+                round,
+                expected: previous_claim,
+                actual,
+            })
+    }
+}
+
+/// Sum `task(0), …, task(tasks − 1)` elementwise (each yields a `len`-sized
+/// vector), failing fast on the first error.
+pub(crate) fn try_par_sum_vecs<F: JoltField, E: Send>(
+    tasks: usize,
+    len: usize,
+    task: impl Fn(usize) -> Result<Vec<F>, E> + Send + Sync,
+) -> Result<Vec<F>, E> {
+    let merge = |mut left: Vec<F>, right: Vec<F>| {
+        for (left, right) in left.iter_mut().zip(right) {
+            *left += right;
+        }
+        left
+    };
+    #[cfg(feature = "parallel")]
+    {
+        (0..tasks).into_par_iter().map(task).try_reduce(
+            || vec![F::zero(); len],
+            |left, right| Ok(merge(left, right)),
+        )
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut folded = vec![F::zero(); len];
+        for index in 0..tasks {
+            folded = merge(folded, task(index)?);
+        }
+        Ok(folded)
+    }
+}
+
+/// Assemble a round message from evaluations at `{0, 2, 3, .., degree}`,
+/// recovering `s(1) = previous_claim − s(0)` — exactly the evaluation vector
+/// the reference tier computes directly (its own round check pins
+/// `s(0) + s(1) = previous_claim`), interpolated through the same
+/// `UnivariatePoly::from_evals` path, so the coefficient vectors are
+/// byte-identical on honest inputs.
+pub(crate) fn round_poly_from_skipped_evals<F: JoltField>(
+    evals_without_one: &[F],
+    previous_claim: F,
+) -> UnivariatePoly<F> {
+    let mut evals = Vec::with_capacity(evals_without_one.len() + 1);
+    evals.push(evals_without_one[0]);
+    evals.push(previous_claim - evals_without_one[0]);
+    evals.extend_from_slice(&evals_without_one[1..]);
+    UnivariatePoly::from_evals(&evals)
+}
+
+#[cfg(feature = "parallel")]
+pub(crate) fn merge_evals<F: JoltField>(mut left: Vec<F>, right: Vec<F>) -> Vec<F> {
+    for (left, right) in left.iter_mut().zip(right) {
+        *left += right;
+    }
+    left
+}
+
+/// `s(t)` samples at `t ∈ {0, 2, 3}` of the cubic triple-product summand
+/// `Σ_y a(y) · b(y) · c(y)` over the remaining low-to-high `(lo, hi)` pairs,
+/// through the deferred-reduction accumulator; `s(1)` comes from the engine's
+/// `from_evals_and_hint` recovery.
+pub(crate) fn triple_product_round_evals<F: JoltField>(
+    half: usize,
+    a: impl Fn(usize) -> (F, F) + Send + Sync,
+    b: impl Fn(usize) -> (F, F) + Send + Sync,
+    c: impl Fn(usize) -> (F, F) + Send + Sync,
+) -> [F; 3] {
+    let accumulate = |y: usize, acc: &mut [F::Accumulator; 3]| {
+        let (a_0, a_1) = a(y);
+        let (b_0, b_1) = b(y);
+        let (c_0, c_1) = c(y);
+        let (a_m, b_m, c_m) = (a_1 - a_0, b_1 - b_0, c_1 - c_0);
+        let (a_2, b_2, c_2) = (a_1 + a_m, b_1 + b_m, c_1 + c_m);
+        acc[0].fmadd(a_0 * b_0, c_0);
+        acc[1].fmadd(a_2 * b_2, c_2);
+        acc[2].fmadd((a_2 + a_m) * (b_2 + b_m), c_2 + c_m);
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        (0..half)
+            .into_par_iter()
+            .fold(
+                || [F::Accumulator::default(); 3],
+                |mut acc, y| {
+                    accumulate(y, &mut acc);
+                    acc
+                },
+            )
+            .map(|acc| acc.map(F::Accumulator::reduce))
+            .reduce(
+                || [F::zero(); 3],
+                |a, b| [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+            )
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut acc = [F::Accumulator::default(); 3];
+        for y in 0..half {
+            accumulate(y, &mut acc);
+        }
+        acc.map(F::Accumulator::reduce)
+    }
+}
+
+/// Sum per-pair-group evaluation contributions over `y = 0..groups` into a
+/// `slots`-sized vector — the dense-table round walk of the pair-group
+/// kernels ([`pair`] serves the `(lo, hi)` values inside `accumulate`).
+pub(crate) fn par_sum_pair_groups<F: JoltField>(
+    groups: usize,
+    slots: usize,
+    accumulate: impl Fn(&mut [F], usize) + Send + Sync,
+) -> Vec<F> {
+    par_sum_pair_groups_reusing(groups, slots, || (), |acc, (), y| accumulate(acc, y))
+}
+
+/// [`par_sum_pair_groups`] with a per-thread scratch buffer, for kernels
+/// whose group walk reuses an allocation across groups (the scratch is
+/// fully overwritten per group).
+pub(crate) fn par_sum_pair_groups_reusing<F: JoltField, S: Send>(
+    groups: usize,
+    slots: usize,
+    scratch: impl Fn() -> S + Send + Sync,
+    accumulate: impl Fn(&mut [F], &mut S, usize) + Send + Sync,
+) -> Vec<F> {
+    #[cfg(feature = "parallel")]
+    {
+        (0..groups)
+            .into_par_iter()
+            .fold(
+                || (vec![F::zero(); slots], scratch()),
+                |(mut acc, mut scratch), y| {
+                    accumulate(&mut acc, &mut scratch, y);
+                    (acc, scratch)
+                },
+            )
+            .map(|(acc, _)| acc)
+            .reduce(|| vec![F::zero(); slots], merge_evals)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut acc = vec![F::zero(); slots];
+        let mut scratch = scratch();
+        for y in 0..groups {
+            accumulate(&mut acc, &mut scratch, y);
+        }
+        acc
+    }
+}
+
+pub(crate) fn map_reduce_chunks<R: Send>(
+    len: usize,
+    chunk_size: usize,
+    map: impl Fn(Range<usize>) -> R + Send + Sync,
+    merge: impl Fn(R, R) -> R + Send + Sync,
+    identity: impl Fn() -> R + Send + Sync,
+) -> R {
+    if len == 0 {
+        return identity();
+    }
+    #[cfg(feature = "parallel")]
+    {
+        let chunks = len.div_ceil(chunk_size);
+        (0..chunks)
+            .into_par_iter()
+            .map(|c| map(c * chunk_size..((c + 1) * chunk_size).min(len)))
+            .reduce(identity, merge)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = (merge, identity, chunk_size);
+        map(0..len)
+    }
+}
+
+/// Collect `f(0), …, f(len − 1)`.
+pub(crate) fn map_indices<T: Send>(len: usize, f: impl Fn(usize) -> T + Send + Sync) -> Vec<T> {
+    #[cfg(feature = "parallel")]
+    {
+        (0..len).into_par_iter().map(f).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..len).map(f).collect()
+    }
+}
+
+pub(crate) fn scan_chunk_size(len: usize) -> usize {
+    #[cfg(feature = "parallel")]
+    {
+        len.div_ceil(rayon::current_num_threads()).max(1024)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        len.max(1)
+    }
+}
+
+/// `LT(·, r) + constant` served from split tables and bound low-to-high
+/// (legacy `LtPolynomial` port).
+///
+/// Big-endian index `j = j_hi ‖ j_lo` with `r = r_hi ‖ r_lo`:
+/// `LT(j, r) = LT(j_hi, r_hi) + eq(j_hi, r_hi) · LT(j_lo, r_lo)`, so an
+/// additive constant folds into the `~√T` hi table and low-to-high binding
+/// touches only `lt_lo`; once the lo variables are exhausted the lo scalar
+/// folds into `lt_hi` and binding continues densely. Values equal the dense
+/// `LtPolynomial::evaluations(r)` table (plus the constant) bound identically
+/// — binding acts linearly on the `j_lo` tensor factor. (jolt-poly's
+/// `LtPolynomial` binds high-to-low only, so the low-to-high variant lives
+/// here.)
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
+pub(crate) enum SplitLt<F> {
+    Split {
+        lt_lo: Vec<F>,
+        lt_hi: Vec<F>,
+        eq_hi: Vec<F>,
+    },
+    Dense(Vec<F>),
+}
+
+impl<F: JoltField> SplitLt<F> {
+    pub(crate) fn new(r_cycle: &[F]) -> Self {
+        Self::new_plus_constant(r_cycle, F::zero())
+    }
+
+    /// `LT(·, r_cycle) + constant` — the constant rides in the hi table.
+    pub(crate) fn new_plus_constant(r_cycle: &[F], constant: F) -> Self {
+        let mid = r_cycle.len() / 2;
+        let (r_hi, r_lo) = r_cycle.split_at(r_cycle.len() - mid);
+        if r_lo.is_empty() {
+            return Self::Dense(
+                LtPolynomial::evaluations(r_hi)
+                    .into_iter()
+                    .map(|lt| lt + constant)
+                    .collect(),
+            );
+        }
+        Self::Split {
+            lt_lo: LtPolynomial::evaluations(r_lo),
+            lt_hi: LtPolynomial::evaluations(r_hi)
+                .into_iter()
+                .map(|lt| lt + constant)
+                .collect(),
+            eq_hi: EqPolynomial::<F>::evals(r_hi, None),
+        }
+    }
+
+    /// `(LT[2y], LT[2y + 1])` under low-to-high pairing.
+    #[inline]
+    pub(crate) fn pair(&self, y: usize) -> (F, F) {
+        match self {
+            Self::Split {
+                lt_lo,
+                lt_hi,
+                eq_hi,
+            } => {
+                let lo_len = lt_lo.len();
+                let j = 2 * y;
+                let hi = j / lo_len;
+                let base = lt_hi[hi];
+                let scale = eq_hi[hi];
+                debug_assert!(lo_len >= 2, "adjacent lo indices share the hi part");
+                (
+                    base + scale * lt_lo[j % lo_len],
+                    base + scale * lt_lo[(j + 1) % lo_len],
+                )
+            }
+            Self::Dense(table) => (table[2 * y], table[2 * y + 1]),
+        }
+    }
+
+    pub(crate) fn bind(&mut self, r: F) {
+        match self {
+            Self::Split {
+                lt_lo,
+                lt_hi,
+                eq_hi,
+            } => {
+                bind_pairs(lt_lo, r);
+                if lt_lo.len() == 1 {
+                    let lo_scalar = lt_lo[0];
+                    let dense: Vec<F> = lt_hi
+                        .iter()
+                        .zip(eq_hi.iter())
+                        .map(|(&lt, &eq)| lt + eq * lo_scalar)
+                        .collect();
+                    *self = Self::Dense(dense);
+                }
+            }
+            Self::Dense(table) => bind_pairs(table, r),
+        }
+    }
+
+    pub(crate) fn final_value(&self) -> F {
+        match self {
+            Self::Dense(table) => {
+                debug_assert_eq!(table.len(), 1);
+                table[0]
+            }
+            Self::Split { .. } => unreachable!("split state always has lo variables to bind"),
+        }
+    }
+}
+
+/// Where a kernel's typed rows live: a slice-backed witness serves an
+/// owning handle and every pass re-extracts its windows on the fly — the
+/// materialized row vector never exists; re-emulating sources retain the
+/// collected rows. The generic twin of the spartan-outer kernel's store,
+/// for every carry-style typed-row consumer.
+#[cfg_attr(
+    feature = "allocative",
+    derive(allocative::Allocative),
+    allocative(bound = "B")
+)]
+pub(crate) enum BundleStore<B> {
+    /// The witness plane owns these rows; it reports them itself.
+    #[cfg_attr(feature = "allocative", allocative(skip))]
+    Owned(RandomAccessRows),
+    Retained(
+        #[cfg_attr(feature = "allocative", allocative(visit = crate::backend::visit_heap_free_elements))]
+         Vec<B>,
+    ),
+}
+
+impl<B: WitnessBundle + Copy + Send + Sync> BundleStore<B> {
+    /// Resolve for a witness plane: the owning handle when the source is
+    /// slice-backed (and covers the cycle domain), a materialized collect
+    /// otherwise.
+    pub(crate) fn resolve<F: JoltField>(
+        witness: &dyn JoltWitnessPlane<F>,
+        cycles: usize,
+    ) -> Result<Self, crate::KernelError<F>> {
+        match witness.random_access() {
+            Some(rows) if cycles <= rows.cycles() => Ok(Self::Owned(rows)),
+            _ => Ok(Self::Retained(collect_rows(witness, cycles)?)),
+        }
+    }
+
+    pub(crate) fn access(&self) -> BundleAccess<'_, B> {
+        match self {
+            Self::Owned(rows) => BundleAccess::View(rows),
+            Self::Retained(rows) => BundleAccess::Retained(rows),
+        }
+    }
+}
+
+pub(crate) enum BundleAccess<'a, B> {
+    View(&'a RandomAccessRows),
+    Retained(&'a [B]),
+}
+
+impl<B: WitnessBundle + Copy> BundleAccess<'_, B> {
+    /// The typed row at cycle `t` — an extraction window over a slice-backed
+    /// source, an indexed copy from a retained vector. Pure per index.
+    #[inline]
+    pub(crate) fn row(&self, t: usize) -> Result<B, WitnessError> {
+        match self {
+            Self::View(view) => view.window(t),
+            Self::Retained(rows) => Ok(rows[t]),
+        }
+    }
+}
+
+impl<B: WitnessBundle + Copy + PartialEq> BundleAccess<'_, B> {
+    pub(crate) fn constant_suffix_start(&self, cycles: usize) -> Result<usize, WitnessError> {
+        match self {
+            Self::View(view) => {
+                let prefix = view.physical_cycles().min(cycles);
+                // Only the final padding window lacks a next row. Compare it to
+                // the ordinary padding window before treating that suffix as constant.
+                if prefix < cycles && self.row(prefix)? != self.row(cycles - 1)? {
+                    Ok(cycles)
+                } else {
+                    Ok(prefix)
+                }
+            }
+            Self::Retained(rows) => {
+                let last = &rows[cycles - 1];
+                Ok(rows[..cycles]
+                    .iter()
+                    .rposition(|row| row != last)
+                    .map_or(0, |i| i + 1))
+            }
+        }
+    }
+}
+
+pub(crate) fn prefix_cycle_weights<F: JoltField>(point: &[F], prefix_cycles: usize) -> Vec<F> {
+    let prefix = prefix_cycles.min((1usize << point.len()) - 1);
+    let eq = TensorEqTable::new(point);
+    let tail_mass = EqPolynomial::suffix_sum(point, prefix);
+    map_indices(prefix + 1, |row| {
+        if row == prefix {
+            tail_mass
+        } else {
+            eq.evaluate_index(row)
+        }
+    })
+}
+
+#[inline(always)]
+pub(crate) fn mul_0_optimized<F: JoltField>(left: F, right: F) -> F {
+    if left.is_zero() || right.is_zero() {
+        F::zero()
+    } else {
+        left * right
+    }
+}
+
+/// First-bind value at half-domain index `y` of a raw column:
+/// `raw(2y) + r1·(raw(2y+1) − raw(2y))`.
+#[inline]
+pub(crate) fn bound_pair<F: JoltField>(raw: impl Fn(usize) -> F, r1: F, y: usize) -> F {
+    let lo = raw(2 * y);
+    let hi = raw(2 * y + 1);
+    lo + mul_0_optimized(r1, hi - lo)
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "test fixture and extraction assertions")]
+mod bundle_access_tests {
+    use jolt_claims::protocols::jolt::JoltPolynomialId;
+    use jolt_witness::__private::TraceRow;
+    use jolt_witness::testing::with_sample_backend;
+    use jolt_witness::witnesses::WitnessEnv;
+
+    use super::{BundleAccess, RowSource, WitnessBundle, WitnessError};
+    use crate::optimized::instruction_input::InstructionInputRow;
+
+    #[derive(Clone, Copy, PartialEq)]
+    struct SuccessorPresent(bool);
+
+    impl WitnessBundle for SuccessorPresent {
+        fn from_row(
+            _row: &TraceRow,
+            next: Option<&TraceRow>,
+            _env: &WitnessEnv<'_>,
+        ) -> Result<Self, WitnessError> {
+            Ok(Self(next.is_some()))
+        }
+
+        fn annotated_ids() -> Vec<JoltPolynomialId> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn padding_suffix_keeps_terminal_lookahead_difference() {
+        with_sample_backend(|witness| {
+            let rows = witness.random_access().unwrap();
+            assert_eq!(
+                BundleAccess::<InstructionInputRow>::View(&rows)
+                    .constant_suffix_start(4)
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                BundleAccess::<SuccessorPresent>::View(&rows)
+                    .constant_suffix_start(4)
+                    .unwrap(),
+                4
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod product_grid_tests {
+    #[cfg(feature = "akita")]
+    use jolt_field::Prime128OffsetA7F7;
+    use jolt_field::{Accumulator, Fr, JoltField};
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+
+    use super::{
+        accumulate_product_grid, product_grid_scratch_len, LowDegreeProductSum, TailFactorProducts,
+        MAX_GRID_FACTORS,
+    };
+
+    /// Accumulates several rows into shared lanes and compares every lane to
+    /// the factors multiplied one by one at that lane's point. The scratch is
+    /// refilled with random elements before each row, and the first two rows
+    /// have all-zero slopes and all-zero values.
+    fn assert_product_grid<F: JoltField>(factors: usize) {
+        let mut rng = ChaCha20Rng::seed_from_u64(431);
+        let mut lanes = vec![F::Accumulator::default(); factors];
+        let mut expected = vec![F::zero(); factors];
+        let mut deferred_lanes = vec![F::Accumulator::default(); factors];
+        let mut low_degree = LowDegreeProductSum::default();
+        let mut uncached = LowDegreeProductSum::default();
+        let mut uncached_lanes = vec![F::Accumulator::default(); factors];
+        let mut scratch = vec![F::zero(); product_grid_scratch_len(factors)];
+        let mut random = |zero: bool| -> Vec<F> {
+            (0..factors)
+                .map(|_| {
+                    let value = F::random(&mut rng);
+                    if zero {
+                        F::zero()
+                    } else {
+                        value
+                    }
+                })
+                .collect()
+        };
+        let mut tail_values = random(false);
+        if factors > 4 {
+            tail_values[4] = F::zero();
+        }
+        let tail_products = TailFactorProducts::new(&tail_values[1..]);
+        for row in 0..32 {
+            let mut values = random(row == 1);
+            let mut steps = random(row == 0);
+            if factors == 9 && row == 2 {
+                steps[1..5].fill(F::zero());
+            }
+            if factors == 9 && row >= 3 {
+                let degree = (row - 3) % 10;
+                for index in 0..9 - degree {
+                    steps[index] = F::zero();
+                    if index != 0 && row % 2 == 0 {
+                        values[index] = tail_values[index];
+                    }
+                }
+                if row == 13 {
+                    values[0] = F::zero();
+                }
+            }
+            for (slot, value) in scratch.iter_mut().zip(random(false).iter().cycle()) {
+                *slot = *value;
+            }
+            accumulate_product_grid(&values, &steps, &mut lanes, &mut scratch);
+            if !low_degree.try_accumulate(&values, &steps, tail_products.as_ref()) {
+                accumulate_product_grid(&values, &steps, &mut deferred_lanes, &mut scratch);
+            }
+            if !uncached.try_accumulate(&values, &steps, None) {
+                accumulate_product_grid(&values, &steps, &mut uncached_lanes, &mut scratch);
+            }
+            for (index, expected) in expected.iter_mut().enumerate() {
+                *expected += if index == factors - 1 {
+                    steps.iter().copied().product::<F>()
+                } else {
+                    let point = F::from_u64(index as u64);
+                    values
+                        .iter()
+                        .zip(&steps)
+                        .map(|(value, step)| *value + point * *step)
+                        .product::<F>()
+                };
+            }
+        }
+        low_degree.merge_into(&mut deferred_lanes, &mut scratch);
+        uncached.merge_into(&mut uncached_lanes, &mut scratch);
+        for (index, (lane, expected)) in uncached_lanes.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                lane.reduce(),
+                *expected,
+                "{factors} factors, uncached lane {index}"
+            );
+        }
+        for (index, ((lane, deferred), expected)) in
+            lanes.iter().zip(deferred_lanes).zip(expected).enumerate()
+        {
+            assert_eq!(lane.reduce(), expected, "{factors} factors, lane {index}");
+            assert_eq!(
+                deferred.reduce(),
+                expected,
+                "{factors} factors, adaptive lane {index}"
+            );
+        }
+    }
+
+    /// Covers the direct walk (2, 3), the unrolled forms (4, 5, 8, 9), and the
+    /// balanced tree at every other length up to the largest supported one,
+    /// odd splits included.
+    #[test]
+    fn products_match_direct_evaluations_at_every_supported_length() {
+        for factors in 2..=MAX_GRID_FACTORS {
+            assert_product_grid::<Fr>(factors);
+        }
+    }
+
+    #[cfg(feature = "akita")]
+    #[test]
+    fn products_match_direct_evaluations_at_every_supported_length_fp128() {
+        for factors in 2..=MAX_GRID_FACTORS {
+            assert_product_grid::<Prime128OffsetA7F7>(factors);
+        }
+    }
+}

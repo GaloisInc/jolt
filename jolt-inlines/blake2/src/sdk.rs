@@ -1,29 +1,75 @@
 //! High-level Blake2b hashing API for host and guest modes.
-use crate::{BLOCK_INPUT_SIZE_IN_BYTES, IV, MSG_BLOCK_LEN, STATE_VECTOR_LEN};
+use crate::{
+    BLOCK_INPUT_SIZE_IN_BYTES, IV, MSG_BLOCK_LEN, PERSONA_SIZE_IN_BYTES, SALT_SIZE_IN_BYTES,
+    STATE_VECTOR_LEN,
+};
 const OUTPUT_SIZE: usize = 64;
+const INITIAL_STATE: [u64; STATE_VECTOR_LEN] = {
+    let mut h = IV;
+    h[0] ^= 0x01010000 ^ (OUTPUT_SIZE as u64);
+    h
+};
 
+#[derive(Clone)]
 pub struct Blake2b {
-    /// Hash state (8 x 64-bit words)
     h: [u64; STATE_VECTOR_LEN],
-    /// Buffer for incomplete blocks
     buffer: [u8; BLOCK_INPUT_SIZE_IN_BYTES],
-    /// Current number of bytes in `buffer`.
     buffer_len: usize,
-    /// Total number of bytes processed so far.
     counter: u64,
+    /// Digest length folded into the IV; the finalize paths must emit exactly this many bytes.
+    output_len: usize,
 }
 
 impl Blake2b {
     #[inline(always)]
     pub fn new() -> Self {
-        let mut h = IV;
-        h[0] ^= 0x01010000 ^ (OUTPUT_SIZE as u64);
+        Self {
+            h: INITIAL_STATE,
+            buffer: [0; BLOCK_INPUT_SIZE_IN_BYTES],
+            buffer_len: 0,
+            counter: 0,
+            output_len: OUTPUT_SIZE,
+        }
+    }
 
+    /// Blake2b with an `output_len`-byte digest (1..=64). The digest length is
+    /// part of the parameter block folded into the IV, so a shorter digest is
+    /// its own hash function, not a truncation of the 64-byte one.
+    ///
+    /// # Panics
+    /// Panics if `output_len` is not in `1..=64`.
+    #[inline(always)]
+    pub fn new_with_output_len(output_len: usize) -> Self {
+        assert!(
+            (1..=OUTPUT_SIZE).contains(&output_len),
+            "Blake2b digest length must be 1..=64 bytes"
+        );
+        let mut h = IV;
+        h[0] ^= 0x01010000 ^ (output_len as u64);
         Self {
             h,
             buffer: [0; BLOCK_INPUT_SIZE_IN_BYTES],
             buffer_len: 0,
             counter: 0,
+            output_len,
+        }
+    }
+
+    /// Creates a new hasher with the given salt and personalization,
+    /// matching the `blake2` crate's `new_with_params` semantics.
+    ///
+    /// Shorter values are zero-padded per the BLAKE2b specification.
+    ///
+    /// # Panics
+    /// Panics if `salt` or `persona` is longer than 16 bytes.
+    #[inline(always)]
+    pub fn new_with_params(salt: &[u8], persona: &[u8]) -> Self {
+        Self {
+            h: initial_state_with_params(salt, persona),
+            buffer: [0; BLOCK_INPUT_SIZE_IN_BYTES],
+            buffer_len: 0,
+            counter: 0,
+            output_len: OUTPUT_SIZE,
         }
     }
 
@@ -36,7 +82,6 @@ impl Blake2b {
 
         let mut offset = 0;
 
-        // Handle partial buffer first
         if self.buffer_len != 0 {
             let needed = BLOCK_INPUT_SIZE_IN_BYTES - self.buffer_len;
             let to_copy = needed.min(input_len);
@@ -78,7 +123,6 @@ impl Blake2b {
             offset += BLOCK_INPUT_SIZE_IN_BYTES;
         }
 
-        // Buffer any remaining bytes
         let final_bytes = input_len - offset;
         if final_bytes > 0 {
             unsafe {
@@ -92,64 +136,93 @@ impl Blake2b {
         }
     }
 
+    /// Compresses the buffered bytes, zero-padded, as the final block.
+    #[inline(always)]
+    fn compress_final(&mut self) {
+        self.counter += self.buffer_len as u64;
+        self.buffer[self.buffer_len..].fill(0);
+        compression_caller(&mut self.h, &self.buffer, self.counter, true);
+    }
+
+    /// Finalize a 64-byte-digest hasher.
+    ///
+    /// # Panics
+    /// Panics if this hasher was created with a shorter digest length; use
+    /// [`Self::finalize_into`] for those.
     #[inline(always)]
     pub fn finalize(mut self) -> [u8; OUTPUT_SIZE] {
-        self.counter += self.buffer_len as u64;
+        assert_eq!(
+            self.output_len, OUTPUT_SIZE,
+            "Blake2b::finalize needs a 64-byte digest; use finalize_into"
+        );
+        self.compress_final();
+        to_bytes(self.h)
+    }
 
-        // Zero the remaining bytes using optimized pointer write
-        if self.buffer_len < BLOCK_INPUT_SIZE_IN_BYTES {
-            unsafe {
-                core::ptr::write_bytes(
-                    self.buffer.as_mut_ptr().add(self.buffer_len),
-                    0,
-                    BLOCK_INPUT_SIZE_IN_BYTES - self.buffer_len,
-                );
-            }
-        }
-
-        // Process the final block
-        compression_caller(&mut self.h, &self.buffer, self.counter, true);
-
-        #[cfg(target_endian = "little")]
-        {
-            // Safety: [u64; 8] and [u8; 64] have identical size (64 bytes)
-            unsafe { core::mem::transmute::<[u64; STATE_VECTOR_LEN], [u8; OUTPUT_SIZE]>(self.h) }
-        }
-
-        #[cfg(target_endian = "big")]
-        {
-            // For big-endian, convert each u64 to little-endian bytes
-            let mut hash = [0u8; OUTPUT_SIZE];
-            for i in 0..STATE_VECTOR_LEN {
-                let bytes = self.h[i].to_le_bytes();
-                hash[i * 8..(i + 1) * 8].copy_from_slice(&bytes);
-            }
-            hash
-        }
+    /// Finalize into `out`, which must be exactly the digest length this
+    /// hasher was created with (the leading bytes of the state).
+    ///
+    /// # Panics
+    /// Panics if `out.len()` differs from that digest length. A shorter
+    /// digest is its own hash function, so truncating is never correct.
+    #[inline(always)]
+    pub fn finalize_into(mut self, out: &mut [u8]) {
+        assert_eq!(
+            out.len(),
+            self.output_len,
+            "Blake2b::finalize_into buffer must match the digest length"
+        );
+        self.compress_final();
+        out.copy_from_slice(&to_bytes(self.h)[..out.len()]);
     }
 
     /// Computes BLAKE2b hash in one call.
     /// Optimized for virtual cycles by avoiding intermediate buffers for small inputs.
     #[inline(always)]
     pub fn digest(input: &[u8]) -> [u8; OUTPUT_SIZE] {
-        let mut h = IV;
-        h[0] ^= 0x01010000 ^ (OUTPUT_SIZE as u64);
+        Self::digest_from_state(INITIAL_STATE, input)
+    }
 
+    /// Computes BLAKE2b hash with the given salt and personalization in one call.
+    ///
+    /// Shorter values are zero-padded per the BLAKE2b specification.
+    ///
+    /// # Panics
+    /// Panics if `salt` or `persona` is longer than 16 bytes.
+    #[inline(always)]
+    pub fn digest_with_params(salt: &[u8], persona: &[u8], input: &[u8]) -> [u8; OUTPUT_SIZE] {
+        Self::digest_from_state(initial_state_with_params(salt, persona), input)
+    }
+
+    /// One BLAKE2b compression on the inline: mixes the 16-word message block
+    /// `m` into the state `h` in place, with byte counter `t` and final-block
+    /// flag `last`. 12 rounds, 64-bit counter: the EIP-152 `BLAKE2F` primitive
+    /// for `rounds == 12` with a zero high counter word.
+    #[inline(always)]
+    pub fn compress(h: &mut [u64; STATE_VECTOR_LEN], m: &[u64; MSG_BLOCK_LEN], t: u64, last: bool) {
+        let mut block = [0u64; MSG_BLOCK_LEN + 2];
+        block[..MSG_BLOCK_LEN].copy_from_slice(m);
+        block[MSG_BLOCK_LEN] = t;
+        block[MSG_BLOCK_LEN + 1] = last as u64;
+        // SAFETY: `h` is 8 and `block` 18 aligned u64s, exactly what the
+        // inline reads and writes.
+        unsafe { blake2b_compress(h.as_mut_ptr(), block.as_ptr()) }
+    }
+
+    #[inline(always)]
+    fn digest_from_state(mut h: [u64; STATE_VECTOR_LEN], input: &[u8]) -> [u8; OUTPUT_SIZE] {
         let len = input.len();
 
-        // Empty input: direct compression
         if len == 0 {
             compress_direct(&mut h, &[], 0, true);
             return to_bytes(h);
         }
 
-        // Single block (≤128 bytes): direct compression (no intermediate buffer)
         if len <= BLOCK_INPUT_SIZE_IN_BYTES {
             compress_direct(&mut h, input, len as u64, true);
             return to_bytes(h);
         }
 
-        // Large input: process full blocks directly, then final block
         let full_blocks = len / BLOCK_INPUT_SIZE_IN_BYTES;
         let tail_len = len % BLOCK_INPUT_SIZE_IN_BYTES;
         let non_final_blocks = if tail_len == 0 {
@@ -158,7 +231,6 @@ impl Blake2b {
             full_blocks
         };
 
-        // Process non-final blocks directly (no copy)
         for i in 0..non_final_blocks {
             let offset = i * BLOCK_INPUT_SIZE_IN_BYTES;
             let block = &input[offset..offset + BLOCK_INPUT_SIZE_IN_BYTES];
@@ -170,14 +242,11 @@ impl Blake2b {
             );
         }
 
-        // Final block
         if tail_len == 0 {
-            // Last full block is final
             let offset = (full_blocks - 1) * BLOCK_INPUT_SIZE_IN_BYTES;
             let block = &input[offset..offset + BLOCK_INPUT_SIZE_IN_BYTES];
             compress(&mut h, block, len as u64, true);
         } else {
-            // Partial final block: use direct compression
             let tail_offset = full_blocks * BLOCK_INPUT_SIZE_IN_BYTES;
             compress_direct(&mut h, &input[tail_offset..], len as u64, true);
         }
@@ -186,7 +255,32 @@ impl Blake2b {
     }
 }
 
-/// Convert hash state to output bytes.
+/// Initial state with the salt and personalization words of the BLAKE2b parameter block XORed
+/// into the IV, as defined by section 2.8 of the
+/// [BLAKE2 specification](https://www.blake2.net/blake2.pdf).
+#[inline(always)]
+#[expect(clippy::unwrap_used)]
+fn initial_state_with_params(salt: &[u8], persona: &[u8]) -> [u64; STATE_VECTOR_LEN] {
+    assert!(
+        salt.len() <= SALT_SIZE_IN_BYTES,
+        "salt must be at most 16 bytes"
+    );
+    assert!(
+        persona.len() <= PERSONA_SIZE_IN_BYTES,
+        "persona must be at most 16 bytes"
+    );
+
+    let mut params = [0u8; SALT_SIZE_IN_BYTES + PERSONA_SIZE_IN_BYTES];
+    params[..salt.len()].copy_from_slice(salt);
+    params[SALT_SIZE_IN_BYTES..SALT_SIZE_IN_BYTES + persona.len()].copy_from_slice(persona);
+
+    let mut h = INITIAL_STATE;
+    for (word, chunk) in h[4..].iter_mut().zip(params.chunks_exact(8)) {
+        *word ^= u64::from_le_bytes(chunk.try_into().unwrap());
+    }
+    h
+}
+
 #[inline(always)]
 fn to_bytes(h: [u64; STATE_VECTOR_LEN]) -> [u8; OUTPUT_SIZE] {
     #[cfg(target_endian = "little")]
@@ -226,7 +320,6 @@ fn compression_caller(
 
     #[cfg(target_endian = "big")]
     {
-        // For big-endian, we need to convert each u64
         for i in 0..MSG_BLOCK_LEN {
             let offset = i * 8;
             message[i] = u64::from_le_bytes([
@@ -250,7 +343,6 @@ fn compression_caller(
     }
 }
 
-/// Compress a 128-byte block.
 #[inline(always)]
 fn compress(hash_state: &mut [u64; STATE_VECTOR_LEN], block: &[u8], counter: u64, is_final: bool) {
     let mut message = [0u64; MSG_BLOCK_LEN + 2];
@@ -306,11 +398,9 @@ fn compress_direct(
 
     #[cfg(target_endian = "little")]
     unsafe {
-        // Copy input directly to message
         if len > 0 {
             core::ptr::copy_nonoverlapping(input.as_ptr(), message_ptr, len);
         }
-        // Zero only the padding bytes (from input end to block end)
         if len < BLOCK_INPUT_SIZE_IN_BYTES {
             core::ptr::write_bytes(message_ptr.add(len), 0, BLOCK_INPUT_SIZE_IN_BYTES - len);
         }
@@ -319,12 +409,10 @@ fn compress_direct(
     #[cfg(target_endian = "big")]
     {
         let message_ref = unsafe { &mut *message.as_mut_ptr() };
-        // Zero the message block first for big-endian
         for i in 0..MSG_BLOCK_LEN {
             message_ref[i] = 0;
         }
 
-        // For big-endian, handle partial bytes carefully
         let full_words = len / 8;
         let remaining = len % 8;
 
@@ -352,7 +440,6 @@ fn compress_direct(
         }
     }
 
-    // Set counter and is_final, then compress
     unsafe {
         let message_ref = &mut *message.as_mut_ptr();
         message_ref[MSG_BLOCK_LEN] = counter;
@@ -373,7 +460,10 @@ impl Default for Blake2b {
 /// - `state` must point to a valid array of 8 u64 values
 /// - `message` must point to a valid array of 18 u64 values (16 message + counter + final flag)
 /// - Both pointers must be properly aligned for u64 access
-#[cfg(not(feature = "host"))]
+#[cfg(all(
+    not(feature = "host"),
+    any(target_arch = "riscv32", target_arch = "riscv64")
+))]
 pub(crate) unsafe fn blake2b_compress(state: *mut u64, message: *const u64) {
     use crate::{BLAKE2_FUNCT3, BLAKE2_FUNCT7, INLINE_OPCODE};
     // Memory layout for Blake2 instruction:
@@ -401,7 +491,6 @@ pub(crate) unsafe fn blake2b_compress(state: *mut u64, message: *const u64) {
     let state_slice = core::slice::from_raw_parts_mut(state, 8);
     let message_slice = core::slice::from_raw_parts(message, 18);
 
-    // Convert to arrays for type safety
     let state_array: &mut [u64; 8] = state_slice
         .try_into()
         .expect("State pointer must reference exactly 8 u64 values");
@@ -412,88 +501,70 @@ pub(crate) unsafe fn blake2b_compress(state: *mut u64, message: *const u64) {
     crate::exec::execute_blake2b_compression(state_array, &message_array);
 }
 
+#[cfg(all(
+    not(feature = "host"),
+    not(any(target_arch = "riscv32", target_arch = "riscv64"))
+))]
+pub(crate) unsafe fn blake2b_compress(_state: *mut u64, _message: *const u64) {
+    panic!("blake2b_compress requires RISC-V target or host feature");
+}
+
 #[cfg(all(test, feature = "host"))]
 mod digest_tests {
     use super::*;
-    use hex_literal::hex;
 
+    /// EIP-152 vectors 5 (final) and 6 (not final): 12 rounds, h = BLAKE2b-512
+    /// IV with the parameter block, m = "abc" zero-padded, t = 3.
     #[test]
-    fn test_blake2b_digest() {
-        let test_cases: [(&'static str, &[u8], [u8; 64]); 5] = [
+    fn test_blake2b_compress_eip152_vectors() {
+        let mut h = IV;
+        h[0] ^= 0x0101_0000 ^ 64;
+        let mut m = [0u64; MSG_BLOCK_LEN];
+        m[0] = 0x0063_6261;
+        let expected: [(bool, [u64; STATE_VECTOR_LEN]); 2] = [
             (
-                "empty",
-                b"",
-                hex!("786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce")
+                true,
+                [
+                    0x0d4d_1c98_3fa5_80ba,
+                    0xe9f6_129f_b697_276a,
+                    0xb7c4_5a68_142f_214c,
+                    0xd1a2_ffdb_6fbb_124b,
+                    0x2d79_ab2a_39c5_877d,
+                    0x95cc_3345_ded5_52c2,
+                    0x5a92_f1db_a88a_d318,
+                    0x2399_00d4_ed86_23b9,
+                ],
             ),
             (
-                "lt_128_bytes",
-                b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456",
-                hex!("2d95bd8dfdf8c4077f9bf54fe1a622e8bff985727a1f937f05c19608b93afbde331cc949d67cf29f3cbe081f2a853c13131b7f8f5d162810eec2e0001df9199f")
-            ),
-            (
-                "exactly_128_bytes",
-                b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                hex!("687222a8b7e18fe2351529741f9f377dbfe57ccc40ffacd7dad6457eb0f5434b308c25eeb85f2c434889877eae9cfcda86e2220bbedb5ddeeef1db1b76113997")
-            ),
-            (
-                "gt_128_bytes",
-                b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef456789abcdef0123456789abcdef0123456789abcdef",
-                hex!("eec6581ca2d51e7f8bff0cb9e0742b454bad4d28bb5078737a6bce318bb29902ca6c2fd4c412d9ed6bb2940692b39012b69ab81ca33cca4d292f3a095cd84007")
-            ),
-            (
-                "exactly_256_bytes",
-                b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                hex!("342949a83f4809037dcb71d5d527ef9c8060c20cda8a7e4414bcca487e9bc5726e0d4646b7f869b3f3decb362508ec4672c3314ad345d1c36377fc1f3020585c")
+                false,
+                [
+                    0x2c56_0a19_d369_ab75,
+                    0x7527_1c8f_d8f8_ae51,
+                    0x2cc4_7072_4044_6987,
+                    0x5287_d226_2c25_4498,
+                    0xf2a2_5e6d_7f3e_7498,
+                    0x1bd3_9c03_26d2_e8d3,
+                    0x66d6_d3f2_c46a_424e,
+                    0x3547_de6f_11c2_10a6,
+                ],
             ),
         ];
-        for (test_name, input, expected) in test_cases {
-            let hash = Blake2b::digest(input);
-            assert_eq!(
-                hash,
-                expected,
-                "Blake2b test failed for case: {test_name} (input length: {} bytes)",
-                input.len()
-            );
-        }
-    }
-
-    #[test]
-    fn test_blake2b_against_reference_implementation() {
-        for pattern_id in 0..4 {
-            let (pattern_name, pattern_fn): (&str, fn(usize) -> u8) = match pattern_id {
-                0 => ("sequential", |i| (i) as u8),
-                1 => ("zeros", |_| 0u8),
-                2 => ("ones", |_| 255u8),
-                3 => ("random_pattern", |i| ((i * 7 + 13) % 256) as u8),
-                _ => unreachable!(),
-            };
-            let mut input = [0u8; 1200];
-            for (i, item) in input.iter_mut().enumerate() {
-                *item = pattern_fn(i);
-            }
-            for length in 0..=1200 {
-                use blake2::Digest as RefDigest;
-                assert_eq!(
-                    Blake2b::digest(&input),
-                    Into::<[u8; 64]>::into(blake2::Blake2b512::digest(input)),
-                    "Blake2b mismatch with {pattern_name} pattern at length {length}"
-                );
-            }
+        for (last, want) in expected {
+            let mut got = h;
+            Blake2b::compress(&mut got, &m, 3, last);
+            assert_eq!(got, want, "last = {last}");
         }
     }
 
     #[test]
     fn test_blake2b_variable_input_lengths() {
         const MAX_LENGTH: usize = 1200;
-        // Pre-generate a large input buffer with a repeating pattern
         let input_buffer: [u8; MAX_LENGTH] = std::array::from_fn(|i| {
-            // Create a more complex pattern that changes based on position
             let base = (i % 256) as u8;
             let modifier = ((i / 256) * 17 + (i % 7) * 31) as u8;
             base.wrapping_add(modifier)
         });
 
-        // Test every length from 0 to MAX_LENGTH
         for length in 0..=MAX_LENGTH {
             let input = &input_buffer[..length];
             use blake2::Digest as RefDigest;
@@ -504,93 +575,84 @@ mod digest_tests {
             );
         }
     }
+}
+
+#[cfg(all(test, feature = "host"))]
+#[expect(clippy::unwrap_used)]
+mod params_tests {
+    use super::*;
+
+    fn reference_with_params(salt: &[u8], persona: &[u8], input: &[u8]) -> [u8; OUTPUT_SIZE] {
+        use blake2::digest::Mac;
+        let mut mac =
+            blake2::Blake2bMac512::new_with_salt_and_personal(None, salt, persona).unwrap();
+        mac.update(input);
+        mac.finalize().into_bytes().into()
+    }
 
     #[test]
-    fn test_blake2b_edge_case_lengths() {
-        use blake2::{Blake2b512, Digest as RefDigest};
-
-        // Test specific edge case lengths that are important for Blake2b
-        let critical_lengths = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, // Very small
-            15, 16, 17, // Around 16-byte boundary
-            31, 32, 33, // Around 32-byte boundary
-            55, 56, 57, // Just before block size
-            63, 64, 65, // Around 64-byte boundary
-            111, 112, 113, // Random mid-range
-            127, 128, 129, // Around 128-byte boundary (2 blocks)
-            191, 192, 193, // 3 blocks
-            255, 256, 257, // Around 256-byte boundary
-            511, 512, 513, // Around 512-byte boundary
-            1023, 1024, 1025, // Around 1024-byte boundary
-            1199, 1200, // At max length
+    fn test_blake2b_params_against_reference() {
+        let params: [(&[u8], &[u8]); 6] = [
+            (b"", b"ZcashPrevoutHash"),
+            (b"0123456789abcdef", b""),
+            (b"0123456789abcdef", b"fedcba9876543210"),
+            (b"salt", b"persona"),
+            (b"s", b"p"),
+            (b"", b""),
         ];
+        let input_buffer: [u8; 1200] = std::array::from_fn(|i| ((i * 213 + 17) % 256) as u8);
+        let lengths = [0, 1, 8, 64, 127, 128, 129, 255, 256, 257, 512, 1199, 1200];
 
-        const MAX_TEST_LENGTH: usize = 1200;
-        let input_buffer: [u8; MAX_TEST_LENGTH] = std::array::from_fn(|i| {
-            // Create a pseudo-random but deterministic pattern
-            ((i * 213 + 17) % 256) as u8
-        });
-
-        for &length in &critical_lengths {
-            if length <= MAX_TEST_LENGTH {
+        for (salt, persona) in params {
+            for length in lengths {
                 let input = &input_buffer[..length];
+                let expected = reference_with_params(salt, persona, input);
+
                 assert_eq!(
-                    Blake2b::digest(input),
-                    Into::<[u8; 64]>::into(Blake2b512::digest(input)),
-                    "Blake2b mismatch at critical length {length}"
+                    Blake2b::digest_with_params(salt, persona, input),
+                    expected,
+                    "digest_with_params mismatch: salt={salt:?}, persona={persona:?}, length={length}"
+                );
+
+                let mut hasher = Blake2b::new_with_params(salt, persona);
+                hasher.update(input);
+                assert_eq!(
+                    hasher.finalize(),
+                    expected,
+                    "new_with_params streaming mismatch: salt={salt:?}, persona={persona:?}, length={length}"
                 );
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "salt must be at most 16 bytes")]
+    fn test_blake2b_oversized_salt_panics() {
+        let _ = Blake2b::new_with_params(b"01234567890123456", b"");
+    }
+
+    #[test]
+    #[should_panic(expected = "persona must be at most 16 bytes")]
+    fn test_blake2b_oversized_persona_panics() {
+        let _ = Blake2b::digest_with_params(b"", b"01234567890123456", b"");
+    }
+
+    #[test]
+    #[should_panic(expected = "buffer must match the digest length")]
+    fn test_blake2b_finalize_into_rejects_truncation() {
+        Blake2b::new().finalize_into(&mut [0u8; 32]);
+    }
+
+    #[test]
+    #[should_panic(expected = "needs a 64-byte digest")]
+    fn test_blake2b_finalize_rejects_short_digest() {
+        let _ = Blake2b::new_with_output_len(32).finalize();
     }
 }
 
 #[cfg(all(test, feature = "host"))]
 mod streaming_tests {
     use super::*;
-    use hex_literal::hex;
-
-    #[test]
-    fn test_blake2b_streaming_digest() {
-        let test_cases: [(&'static str, &[u8], [u8; 64]); 5] = [
-            (
-                "empty",
-                b"",
-                hex!("786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce")
-            ),
-            (
-                "lt_128_bytes",
-                b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456",
-                hex!("2d95bd8dfdf8c4077f9bf54fe1a622e8bff985727a1f937f05c19608b93afbde331cc949d67cf29f3cbe081f2a853c13131b7f8f5d162810eec2e0001df9199f")
-            ),
-            (
-                "exactly_128_bytes",
-                b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                hex!("687222a8b7e18fe2351529741f9f377dbfe57ccc40ffacd7dad6457eb0f5434b308c25eeb85f2c434889877eae9cfcda86e2220bbedb5ddeeef1db1b76113997")
-            ),
-            (
-                "gt_128_bytes",
-                b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef456789abcdef0123456789abcdef0123456789abcdef",
-                hex!("eec6581ca2d51e7f8bff0cb9e0742b454bad4d28bb5078737a6bce318bb29902ca6c2fd4c412d9ed6bb2940692b39012b69ab81ca33cca4d292f3a095cd84007")
-            ),
-            (
-                "exactly_256_bytes",
-                b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                hex!("342949a83f4809037dcb71d5d527ef9c8060c20cda8a7e4414bcca487e9bc5726e0d4646b7f869b3f3decb362508ec4672c3314ad345d1c36377fc1f3020585c")
-            ),
-        ];
-
-        for (test_name, input, expected) in test_cases {
-            let mut hasher = Blake2b::new();
-            hasher.update(input);
-            let hash = hasher.finalize();
-            assert_eq!(
-                hash,
-                expected,
-                "Blake2b streaming test failed for case: {test_name} (input length: {} bytes)",
-                input.len()
-            );
-        }
-    }
 
     #[test]
     fn test_blake2b_streaming_against_reference() {
@@ -624,44 +686,18 @@ mod streaming_tests {
     }
 
     #[test]
-    fn test_blake2b_streaming_variable_lengths() {
-        const MAX_LENGTH: usize = 1200;
-
-        let input_buffer: [u8; MAX_LENGTH] = std::array::from_fn(|i| {
-            let base = (i % 256) as u8;
-            let modifier = ((i / 256) * 17 + (i % 7) * 31) as u8;
-            base.wrapping_add(modifier)
-        });
-
-        for length in 0..=MAX_LENGTH {
-            let input = &input_buffer[..length];
-            let mut hasher = Blake2b::new();
-            hasher.update(input);
-
-            use blake2::Digest as RefDigest;
-            assert_eq!(
-                hasher.finalize(),
-                Into::<[u8; 64]>::into(blake2::Blake2b512::digest(input)),
-                "Blake2b streaming mismatch at input length {length}"
-            );
-        }
-    }
-
-    #[test]
     fn test_blake2b_streaming_incremental_updates() {
         use blake2::Digest as RefDigest;
 
         const MAX_LENGTH: usize = 512;
         let input_buffer: [u8; MAX_LENGTH] = std::array::from_fn(|i| ((i * 137 + 42) % 256) as u8);
 
-        // Test different chunk sizes
         let chunk_sizes = [1, 3, 7, 16, 32, 63, 64, 65, 128];
         let test_lengths = [0, 1, 63, 64, 65, 127, 128, 129, 255, 256, 257, MAX_LENGTH];
 
         for &chunk_size in &chunk_sizes {
             for total_length in test_lengths {
                 let input = &input_buffer[..total_length];
-                // Feed data incrementally
                 let mut hasher = Blake2b::new();
                 let mut expected_hasher = blake2::Blake2b512::new();
                 let mut offset = 0;
@@ -681,80 +717,17 @@ mod streaming_tests {
     }
 
     #[test]
-    fn test_blake2b_streaming_edge_cases() {
-        use blake2::Digest as RefDigest;
-
-        let critical_lengths = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 17, 31, 32, 33, 55, 56, 57, 63, 64, 65, 111, 112,
-            113, 127, 128, 129, 191, 192, 193, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025,
-            1199, 1200,
-        ];
-
-        const MAX_TEST_LENGTH: usize = 1200;
-        let input_buffer: [u8; MAX_TEST_LENGTH] =
-            std::array::from_fn(|i| ((i * 213 + 17) % 256) as u8);
-
-        for &length in &critical_lengths {
-            if length <= MAX_TEST_LENGTH {
-                let input = &input_buffer[..length];
-                let mut hasher = Blake2b::new();
-                hasher.update(input);
-                assert_eq!(
-                    hasher.finalize(),
-                    Into::<[u8; 64]>::into(blake2::Blake2b512::digest(input)),
-                    "Blake2b streaming mismatch at critical length {length}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_blake2b_streaming_multiple_updates() {
-        use blake2::Digest as RefDigest;
-
-        let data_parts: &[&[u8]] = &[
-            b"Hello, ",
-            b"this is ",
-            b"a test of ",
-            b"multiple ",
-            b"updates to ",
-            b"the Blake2b ",
-            b"streaming ",
-            b"interface!",
-        ];
-
-        const TOTAL_LEN: usize = 77;
-        let mut full_data = [0u8; TOTAL_LEN];
-        let mut offset = 0;
-
-        for part in data_parts {
-            full_data[offset..offset + part.len()].copy_from_slice(part);
-            offset += part.len();
-        }
-
-        let mut hasher = Blake2b::new();
-        for part in data_parts {
-            hasher.update(part);
-        }
-        assert_eq!(
-            hasher.finalize(),
-            Into::<[u8; 64]>::into(blake2::Blake2b512::digest(full_data)),
-            "Multiple updates should produce same result as single update"
-        );
-    }
-
-    #[test]
     fn test_blake2b_streaming_empty_updates() {
         use blake2::Digest as RefDigest;
 
         let test_data = b"Some test data for empty update testing";
 
         let mut hasher = Blake2b::new();
-        hasher.update(b""); // Empty update at start
+        hasher.update(b"");
         hasher.update(&test_data[..10]);
-        hasher.update(b""); // Empty update in middle
+        hasher.update(b"");
         hasher.update(&test_data[10..]);
-        hasher.update(b""); // Empty update at end
+        hasher.update(b"");
 
         assert_eq!(
             hasher.finalize(),
@@ -765,21 +738,17 @@ mod streaming_tests {
 
     #[test]
     fn test_blake2b_aligned_vs_unaligned() {
-        // Test various sizes to cover different code paths
         let test_sizes = [
             0, 1, 7, 8, 15, 16, 31, 32, 63, 64, 65, 127, 128, 129, 256, 512, 1024, 2048,
         ];
 
         for &size in &test_sizes {
-            // Create aligned buffer (array is naturally aligned)
             let aligned: Vec<u8> = (0..size).map(|i| (i * 37 + 11) as u8).collect();
 
-            // Create unaligned buffer by adding 1-byte offset
             let mut unaligned_buf = vec![0u8; size + 1];
             unaligned_buf[1..].copy_from_slice(&aligned);
             let unaligned = &unaligned_buf[1..];
 
-            // Verify alignment difference
             if size > 0 {
                 assert_ne!(
                     aligned.as_ptr() as usize % 8,
@@ -788,7 +757,6 @@ mod streaming_tests {
                 );
             }
 
-            // Both should produce identical results
             let aligned_result = Blake2b::digest(&aligned);
             let unaligned_result = Blake2b::digest(unaligned);
 
@@ -797,7 +765,6 @@ mod streaming_tests {
                 "Blake2b: aligned vs unaligned mismatch at size {size}"
             );
 
-            // Also verify against reference implementation
             use blake2::Digest as RefDigest;
             let expected: [u8; 64] = blake2::Blake2b512::digest(&aligned).into();
             assert_eq!(

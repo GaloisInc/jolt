@@ -9,15 +9,18 @@ repository = "https://github.com/a16z/jolt"
 
 [features]
 default = []
-host = ["dep:ctor", "dep:tracer", "dep:tracing"]
+# The host build also checks the `digest` adapter against the `blake2` crate.
+host = ["jolt-inlines-sdk/host", "digest"]
+# `digest` trait adapter over the inline hasher, for `Digest`-generic users
+# such as Fiat-Shamir transcripts.
+digest = ["dep:digest"]
 
 [dependencies]
-ctor = { workspace = true, optional = true }
-tracer = { workspace = true, optional = true, features = ["std"] }
-tracing = { workspace = true, optional = true }
+jolt-inlines-sdk = { workspace = true, optional = true }
+digest = { workspace = true, optional = true }
 
 [dev-dependencies]
-hex-literal.workspace = true
 blake2.workspace = true
+jolt-inlines-sdk = { workspace = true, features = ["test-utils"] }
 rand = { workspace = true, features = ["std", "std_rng"] }
 tracer = { workspace = true, features = ["std", "test-utils"] }

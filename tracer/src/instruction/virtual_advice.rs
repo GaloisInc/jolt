@@ -1,10 +1,13 @@
+use crate::instruction::registers::j::RegisterStateJ;
 use serde::{Deserialize, Serialize};
 
-use crate::{emulator::cpu::Cpu, instruction::NormalizedInstruction};
+use crate::{
+    emulator::cpu::Cpu,
+    instruction::{JoltInstructionRow, SourceInstructionRow},
+};
 
 use super::{format::format_j::FormatJ, RISCVInstruction, RISCVTrace};
 
-// Special case for VirtualAdvice as it has an extra 'advice' field
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct VirtualAdvice {
     pub address: u64,
@@ -25,10 +28,17 @@ impl RISCVInstruction for VirtualAdvice {
     const MATCH: u32 = 0; // Virtual
 
     type Format = FormatJ;
-    type RAMAccess = ();
+    type RegisterState = RegisterStateJ;
+    type RamAccess = ();
 
     fn operands(&self) -> &Self::Format {
         &self.operands
+    }
+
+    fn source_kind(&self) -> jolt_riscv::SourceInstructionKind {
+        jolt_riscv::SourceInstructionKind::VirtualAdvice(
+            jolt_riscv::instructions::VirtualAdvice(()),
+        )
     }
 
     fn new(_: u32, _: u64, _: bool, _: bool) -> Self {
@@ -49,13 +59,13 @@ impl RISCVInstruction for VirtualAdvice {
         }
     }
 
-    fn execute(&self, cpu: &mut Cpu, _: &mut Self::RAMAccess) {
-        cpu.x[self.operands.rd as usize] = self.advice as i64;
+    fn execute(&self, cpu: &mut Cpu, _: &mut Self::RamAccess) {
+        cpu.write_register(self.operands.rd as usize, self.advice as i64);
     }
 }
 
-impl From<NormalizedInstruction> for VirtualAdvice {
-    fn from(ni: NormalizedInstruction) -> Self {
+impl From<JoltInstructionRow> for VirtualAdvice {
+    fn from(ni: JoltInstructionRow) -> Self {
         Self {
             address: ni.address as u64,
             operands: ni.operands.into(),
@@ -67,14 +77,15 @@ impl From<NormalizedInstruction> for VirtualAdvice {
     }
 }
 
-impl From<VirtualAdvice> for NormalizedInstruction {
-    fn from(val: VirtualAdvice) -> Self {
-        NormalizedInstruction {
-            address: val.address as usize,
-            operands: val.operands.into(),
-            is_compressed: val.is_compressed,
-            is_first_in_sequence: val.is_first_in_sequence,
-            virtual_sequence_remaining: val.virtual_sequence_remaining,
+impl From<SourceInstructionRow> for VirtualAdvice {
+    fn from(row: SourceInstructionRow) -> Self {
+        Self {
+            address: row.address as u64,
+            operands: row.operands.into(),
+            advice: 0,
+            virtual_sequence_remaining: None,
+            is_first_in_sequence: false,
+            is_compressed: row.is_compressed,
         }
     }
 }

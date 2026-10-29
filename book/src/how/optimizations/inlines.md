@@ -8,9 +8,9 @@ Jolt inlines are a unique optimization technique that replaces high-level operat
 
 **Native RISC-V Integration**: Inlines expand into sequences of RISC-V instructions that execute within the same trace as regular program code. This seamless integration eliminates the complexity of bridging between different proof systems.
 
-**Custom Instructions**: Jolt enables the creation of custom instructions that can accelerate common operations. These custom instructions must have structured multilinear extension (MLE) polynomials, meaning that they can be evaluated efficiently in small space (see [prefix-suffix sumcheck](../instruction-execution.html) for details on structured MLEs). By ensuring all custom instructions maintain this property, Jolt achieves the performance benefits of specialized operations without sacrificing the simplicity of its proof system. This is the core innovation that distinguishes Jolt inlines from traditional precompiles or simple assembly optimizations - we compress complex operations into lookup-friendly instructions that remain fully verifiable within the main zkVM, eliminating the need for complex glue logic or separate constraint systems.
+**Custom Instructions**: Jolt enables the creation of custom instructions that can accelerate common operations. These custom instructions must have structured multilinear extension (MLE) polynomials, meaning that they can be evaluated efficiently in small space (see [prefix-suffix sumcheck](../architecture/instruction_execution.md) for details on structured MLEs). By ensuring all custom instructions maintain this property, Jolt achieves the performance benefits of specialized operations without sacrificing the simplicity of its proof system. This is the core innovation that distinguishes Jolt inlines from traditional precompiles or simple assembly optimizations - we compress complex operations into lookup-friendly instructions that remain fully verifiable within the main zkVM, eliminating the need for complex glue logic or separate constraint systems.
 
-**Extended Register Set**: Inline sequences have access to additional virtual registers beyond the standard RISC-V register set (specifically registers 47--63, allocated via `allocate_for_inline()`). This expanded register space allows complex operations to maintain state in registers rather than memory, dramatically reducing load/store operations. See [virtual register layout](../architecture/registers.md#virtual-register-layout) for details.
+**Extended Register Set**: Inline sequences have access to additional virtual registers beyond the standard RISC-V register set (specifically registers 48--127, allocated via `allocate_for_inline()`). This expanded register space allows complex operations to maintain state in registers rather than memory, dramatically reducing load/store operations. See [virtual register layout](../architecture/registers.md#virtual-register-layout) for details.
 
 ## Example Usage
 
@@ -55,17 +55,24 @@ For advanced use cases, you can invoke inlines directly through inline assembly.
 - **funct7**: Identifies the type of operation (e.g., `0x00` for SHA2)
 - **funct3**: Identifies sub-instructions within that operation (e.g., `0x0` for SHA256, `0x1` for SHA256INIT)
 
+Both SHA-256 entries read a raw 64-byte block in SHA-256's big-endian byte order. A native-endian `[u32; 16]` has the wrong layout on little-endian guests.
+
 #### Jolt Core Inlines Reference
 
 | Inline        | Opcode | funct7 | funct3 | Description                                |
 | ------------- | ------ | ------ | ------ | ------------------------------------------ |
-| SHA256        | 0x0B   | 0x00   | 0x00   | SHA-256 compression with existing state    |
-| SHA256INIT    | 0x0B   | 0x00   | 0x01   | SHA-256 compression with initial constants |
+| SHA256        | 0x0B   | 0x00   | 0x00   | SHA-256 compression with existing state and big-endian input block    |
+| SHA256INIT    | 0x0B   | 0x00   | 0x01   | SHA-256 compression with initial constants and big-endian input block |
 | KECCAK256     | 0x0B   | 0x01   | 0x00   | Keccak-256 permutation                     |
 | BLAKE2B       | 0x0B   | 0x02   | 0x00   | BLAKE2b compression                        |
 | BLAKE3        | 0x0B   | 0x03   | 0x00   | BLAKE3 compression                         |
 | BLAKE3KEYED64 | 0x0B   | 0x03   | 0x01   | BLAKE3 compression keyed                   |
 | BIGINT256_MUL | 0x0B   | 0x04   | 0x00   | 256-bit bigint multiplication              |
+| SECP256K1_*   | 0x0B   | 0x05   | 0x00–0x07 | secp256k1 field ops + GLV advice        |
+| GRUMPKIN_*    | 0x0B   | 0x06   | 0x00–0x01 | grumpkin field division advice           |
+| P256_*        | 0x0B   | 0x07   | 0x00–0x07 | P-256 field ops + Fake GLV advice       |
+| NTT64_I32_FORWARD | 0x0B | 0x08 | 0x00 | 64-point negacyclic i32 Montgomery NTT |
+| NTT64_I32_POINTWISE_DOT6 | 0x0B | 0x09 | 0x00 | Six-product pointwise dot of NTT rows |
 
 ```rust
 unsafe {
@@ -73,7 +80,7 @@ unsafe {
     // opcode=0x0B (core inline), funct3=0x0 (SHA256), funct7=0x00 (SHA2 family)
     core::arch::asm!(
         ".insn r 0x0B, 0x0, 0x00, x0, {}, {}",
-        in(reg) input_ptr,  // Pointer to 16 u32 words
+        in(reg) input_ptr,  // Pointer to a big-endian 64-byte block
         in(reg) state_ptr,  // Pointer to 8 u32 words
         options(nostack)
     );
@@ -89,7 +96,7 @@ unsafe {
 }
 ```
 
-Additional inlines for Secp256k1 operations are available but wrapped in a higher-level API. See `jolt-inlines/secp256k1` for details and `examples/secp256k1-ecdsa-verify` for an example of a higher-level ECDSA verification function using the Secp256k1 inlines.
+Secp256k1 and P-256 inlines are wrapped in higher-level SDKs that provide field element types and ECDSA verification. See `jolt-inlines/secp256k1`, `jolt-inlines/p256`, and the corresponding examples in `examples/secp256k1-ecdsa-verify` and `examples/p256-ecdsa-verify`.
 
 ## Error Handling in Secp256k1
 
@@ -124,16 +131,16 @@ If verification fails, the proof becomes unsatisfiable. This is appropriate when
 
 ## Benchmarks
 
-The table below compares the performance of reference and inline implementations for each hash function, using identical 32KB inputs and the same API across both reference and inline implementations.
+The table below compares the performance of reference and inline implementations for each hash function, using identical 32 KiB inputs and the same API across both reference and inline implementations.
 
 | Hash Function | Implementation | Cycles | Cycles Per Byte (CPB) | Speedup |
 |--------------|----------------|----------------|----------------------|---------|
-| SHA-256      | [sha2 crate](https://crates.io/crates/sha2)      | 10,414,653     | 317.94               | -       |
-| SHA-256      | **Jolt Inline**     | **1,765,207**  | **53.89**            | **5.9×** |
-| Keccak-256   | [sha3 crate](https://crates.io/crates/sha3)      | 2,556,519      | 78.04                | -       |
-| Keccak-256   | **Jolt Inline**     | **848,224**    | **25.89**            | **3.01×** |
-| Blake2B      | [blake2 crate](https://crates.io/crates/blake2)      | 968,562        | 29.57                | -       |
-| Blake2B      | **Jolt Inline**     | **340,787**    | **10.40**            | **2.85×** |
+| SHA-256      | [sha2 crate](https://crates.io/crates/sha2)      | 2,380,389      | 72.64                | -       |
+| SHA-256      | **Jolt Inline**     | **1,037,131**  | **31.65**            | **2.30×** |
+| Keccak-256   | [sha3 crate](https://crates.io/crates/sha3)      | 1,938,499      | 59.16                | -       |
+| Keccak-256   | **Jolt Inline**     | **805,298**    | **24.58**            | **2.41×** |
+| Blake2B      | [blake2 crate](https://crates.io/crates/blake2)      | 820,496        | 25.04                | -       |
+| Blake2B      | **Jolt Inline**     | **304,185**    | **9.28**             | **2.70×** |
 
 *Note: Blake3 currently supports inputs up to 64 bytes. Full implementation for larger inputs is in development.*
 
@@ -149,9 +156,9 @@ The following table shows the data that can be proved by each of the Jolt inline
 
 | Hash Function | MacBook M4 Max (500 kHz) | Threadripper Pro 7975WX (1.5 MHz) |
 |--------------|---------------------|----------------------|
-| SHA-256 Inline | 9.1 KB/s | 27.1 KB/s |
-| Keccak-256 Inline | 18.8 KB/s | 56.1 KB/s |
-| Blake2B Inline | 47.1 KB/s | 139.1 KB/s |
+| SHA-256 Inline | 15.4 KiB/s | 46.3 KiB/s |
+| Keccak-256 Inline | 19.9 KiB/s | 59.6 KiB/s |
+| Blake2B Inline | 52.6 KiB/s | 157.8 KiB/s |
 
 
 ## Jolt CPU Advantages
@@ -160,13 +167,13 @@ The Jolt zkVM architecture provides several unique optimization opportunities th
 
 ### 1. Extended Virtual Registers
 
-Inline sequences have access to virtual registers beyond the standard RISC-V register set. Of the 32 virtual registers (registers 32--63), the first 8 (registers 32--39) are **reserved** for persistent state (LR/SC reservation addresses and M-mode CSRs) and 7 more (registers 40--46) are reserved for instruction-level virtual sequences. Inline sequences use registers 47--63 (up to 17 registers), allocated via `allocate_for_inline()`. See the [virtual register layout](../architecture/registers.md#virtual-register-layout) for the full map.
+Inline sequences have access to virtual registers beyond the standard RISC-V register set. Of the 96 virtual registers (registers 32--127), the first 8 (registers 32--39) are **reserved** for persistent state (LR/SC reservation addresses and M-mode CSRs) and 8 more (registers 40--47) are reserved for instruction-level virtual sequences. Inline sequences use registers 48--127 (up to 80 registers), allocated via `allocate_for_inline()`. See the [virtual register layout](../architecture/registers.md#virtual-register-layout) for the full map.
 
 This allows complex operations to maintain their working state in registers, eliminating hundreds of load/store operations that would otherwise be required. Importantly, this expanded register usage comes with virtually zero additional cost to the prover, making it an essentially "free" optimization from a proof generation perspective.
 
 ### 2. Custom Instructions
 
-Jolt allows creation of custom instructions that can replace common multi-instruction patterns with a single operation. The key innovation here is that these instructions must have structured multilinear extensions (MLEs) that can be evaluated efficiently in small space (see [prefix-suffix sumcheck](../instruction-execution.html)). This is where the real performance gain comes from: by compressing operations into forms that work naturally with Jolt's lookup-based architecture, we achieve dramatic speedups without the complexity of traditional precompiles.
+Jolt allows creation of custom instructions that can replace common multi-instruction patterns with a single operation. The key innovation here is that these instructions must have structured multilinear extensions (MLEs) that can be evaluated efficiently in small space (see [prefix-suffix sumcheck](../architecture/instruction_execution.md)). This is where the real performance gain comes from: by compressing operations into forms that work naturally with Jolt's lookup-based architecture, we achieve dramatic speedups without the complexity of traditional precompiles.
 
 This is fundamentally different from traditional assembly optimization - we're not just rearranging instructions, we're creating new ones that are specifically designed to be "lookupable" within Jolt's proof system. For example, the ROTRI (rotate right immediate) instruction replaces the three-instruction sequence `(x >> imm) | (x << (32-imm))` with a single cycle, while remaining fully verifiable through lookups because it maintains the structured MLE property.
 
@@ -175,6 +182,8 @@ Note that creating custom user-defined instructions is currently only available 
 ### 3. 64-bit Immediate Values
 
 Unlike standard RISC-V which limits immediate values to 12 or 20 bits, inlines can use full 64-bit immediate values. This eliminates the need for multiple instructions to load large constants, reducing both cycle count and register usage.
+
+Load and store offsets are the exception: they keep RISC-V's signed 12-bit range (-2048 to 2047), and Jolt rejects a wider one when it expands the inline. The proof computes a memory address as `rs1 + offset` without wrapping it modulo 2^64, so a wide offset could make an access unprovable. To reach a farther address, compute it into an inline virtual register and load or store from there.
 
 ## Creating Custom Inlines
 
@@ -187,22 +196,24 @@ When creating user-defined inlines, you must adhere to these critical requiremen
 1. **Opcode Space**: Use opcode `0x2B` for user-defined inlines (`0x0B` is reserved for Jolt core inlines)
 
 2. **Virtual Register Management**:
-   - All inline virtual registers (registers 47--63) must be zeroed out at the end of the inline sequence
+   - All inline virtual registers (registers 48--127) must be zeroed out at the end of the inline sequence
    - Reserved registers (32--39) must not be modified by inlines; these hold persistent state (LR/SC reservations, CSRs)
-   - Instruction registers (40--46) are managed by `allocate()` for virtual sequences and must not be used by inlines
+   - Instruction registers (40--47) are managed by `allocate()` for virtual sequences and must not be used by inlines
    - This ensures clean state for subsequent operations
 
 3. **Register Preservation**:
    - Inlines cannot modify any of the real 32 RISC-V registers, including the destination register (`rd`)
-   - The inline must operate purely through memory operations and virtual registers (47--63)
+   - The inline must operate purely through memory operations and virtual registers (48--127)
 
 4. **Instruction Encoding**:
    - Use `funct7` to identify your operation type (must be unique among user-defined inlines)
    - Use `funct3` for sub-instruction variants within your operation
 
 5. **MLE Structure**:
-   - All custom instructions must have structured multilinear extensions (see [prefix-suffix sumcheck](../instruction-execution.html))
+   - All custom instructions must have structured multilinear extensions (see [prefix-suffix sumcheck](../architecture/instruction_execution.md))
    - Complex operations may need to be broken down into simpler instructions that maintain this property
+
+6. **Memory Offsets**: load and store offsets must fit RISC-V's signed 12-bit range (see [64-bit Immediate Values](#3-64-bit-immediate-values))
 
 ### Implementation Structure
 
@@ -216,9 +227,9 @@ A typical inline implementation consists of three main components:
 
 When designing your inline, consider:
 
-- **Register Allocation**: Maximize use of the 17 inline virtual registers (47--63) to minimize memory operations
+- **Register Allocation**: Use the 80 inline virtual registers (48--127) to minimize memory operations
 - **Custom Instructions**: Identify patterns that could benefit from custom instructions (creating custom user-defined instructions is not available at this time)
-- **Immediate Values**: Leverage 64-bit immediate values to reduce instruction count
+- **Immediate Values**: Leverage 64-bit immediate values (except load and store offsets) to reduce instruction count
 - **Memory Access Patterns**: Structure your algorithm to minimize load/store operations
 
 For concrete examples and implementation patterns, study the existing inline implementations in the Jolt codebase.
